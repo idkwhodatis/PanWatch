@@ -1,4 +1,5 @@
 import { interfaceText, isEnglishInterface } from './locale'
+import { clearAuthSession, getAuthRevision, getAuthStatus, invalidateAuthStatusRequests, setAuthStatus, validateAuthStatus, type AuthStatus } from './auth-session'
 
 import { publicUrl } from './base-path'
 
@@ -57,6 +58,13 @@ const API_ERROR_TEXT_EN: Record<string, string> = {
   auth_already_configured: 'An account is already configured. Use the sign-in endpoint instead.',
   auth_not_configured: 'Set up an account before signing in.',
   auth_required: 'Sign in to continue.',
+  auth_expired: 'Your session has expired. Sign in again.',
+  password_login_disabled: 'Password sign-in is disabled. Continue with SSO.',
+  auth_setup_disabled: 'Password setup is disabled for this installation.',
+  selfcheck_requires_post: 'Use POST to run system checks.',
+  entry_candidates_refresh_requires_post: 'Use POST to refresh entry candidates.',
+  csrf_invalid: 'Your session changed or the request could not be verified. Refresh the page and try again.',
+  oidc_not_configured: 'SSO is not configured correctly. Contact the installation owner.',
   avatar_data_invalid: 'The avatar data is invalid.',
   avatar_data_url_invalid: 'The avatar must be a data URL.',
   board_code_required: 'Enter a sector code.',
@@ -136,25 +144,169 @@ export function localizedApiError(body: ApiResponse<unknown>, status: number): s
 }
 
 export function getToken(): string | null {
+  const status = getAuthStatus()
+  if (status && (!status.password_enabled || status.auth_method === 'oidc')) return null
+  const expires = localStorage.getItem('token_expires')
+  if (expires && new Date(expires).getTime() <= Date.now()) {
+    localStorage.removeItem('token')
+    localStorage.removeItem('token_expires')
+    return null
+  }
   return localStorage.getItem('token')
 }
 
-export function logout() {
-  localStorage.removeItem('token')
-  localStorage.removeItem('token_expires')
-  window.location.href = publicUrl('/login')
+export function authHeaders(method = 'GET'): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  const status = getAuthStatus()
+  if (status?.authenticated && status.auth_method === 'oidc'
+    && !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase()) && status.csrf_token) {
+    headers['X-CSRF-Token'] = status.csrf_token
+  }
+  return headers
+}
+
+function redirectToLogin() {
+  // Auth failures on the login/status endpoints must never reload the login page.
+  if (window.location.pathname !== publicUrl('/login')) window.location.href = publicUrl('/login')
+}
+
+export class AuthExpiredError extends Error {}
+
+export function handleUnauthorized(path: string, status: number): void {
+  if (status !== 401 || ['/auth/status', '/auth/login', '/auth/setup', '/auth/logout'].includes(path.split('?')[0])) return
+  clearAuthSession()
+  redirectToLogin()
+  throw new AuthExpiredError(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
+}
+
+interface PasswordCredential {
+  token: string | null
+  expires: string | null
+}
+
+function passwordCredential(): PasswordCredential | null {
+  // Read the raw pair without expiring it: another tab can replace these keys
+  // without changing this tab's in-memory AuthStatus. Same-second JWTs may be
+  // identical, so the more precise login expiry is part of the identity too.
+  try {
+    return { token: localStorage.getItem('token'), expires: localStorage.getItem('token_expires') }
+  } catch {
+    // Inaccessible storage is an unknown identity, never an empty credential.
+    return null
+  }
+}
+
+function samePasswordCredential(left: PasswordCredential | null, right: PasswordCredential | null): boolean {
+  return left !== null && right !== null && left.token === right.token && left.expires === right.expires
+}
+
+let statusRequest: Promise<AuthStatus> | null = null
+
+function readAuthStatus(fresh = false): Promise<AuthStatus> {
+  if (fresh) {
+    // A status request started before a rejected logout may still contain the
+    // old cookie's CSRF token. Do not reuse it or let it replace this fresh read.
+    invalidateAuthStatusRequests()
+    statusRequest = null
+  }
+  if (statusRequest) return statusRequest
+  const revision = getAuthRevision()
+  const response = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' })
+  // Header construction can discard an already expired token. Snapshot after it.
+  const sentCredential = passwordCredential()
+  const request = response.then(validateAuthStatus).then(status => {
+    if (revision !== getAuthRevision() || !samePasswordCredential(sentCredential, passwordCredential())) {
+      const current = getAuthStatus()
+      if (fresh || !current) throw new Error('Authentication changed')
+      return current
+    }
+    setAuthStatus(status)
+    return status
+  }).finally(() => {
+    // An older request must not clear the newer in-flight request's dedup guard.
+    if (statusRequest === request) statusRequest = null
+  })
+  statusRequest = request
+  return request
+}
+
+export function loadAuthStatus(): Promise<AuthStatus> {
+  return readAuthStatus()
+}
+
+function sameAuthSession(left: AuthStatus | null, right: AuthStatus | null): boolean {
+  return left?.authenticated === right?.authenticated
+    && left?.auth_method === right?.auth_method && left?.csrf_token === right?.csrf_token
+}
+
+let logoutRequest: Promise<void> | null = null
+
+export function logout(): Promise<void> {
+  if (logoutRequest) return logoutRequest
+  logoutRequest = (async () => {
+    // Only a known CSRF rejection is safe to retry. Network errors, timeouts,
+    // generic 403s and arbitrary mutations never trigger an automatic replay.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const sentStatus = getAuthStatus()
+      const headers = authHeaders('POST')
+      const sentCredential = passwordCredential()
+      const controller = new AbortController()
+      const timeout = window.setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+      let res: Response
+      try {
+        res = await fetch(`${API_BASE}/auth/logout`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers,
+          signal: controller.signal,
+        })
+      } finally {
+        window.clearTimeout(timeout)
+      }
+      if (res.status !== 401) {
+        const body: ApiResponse<unknown> = await res.json().catch(() => ({ code: res.status, data: null, message: `HTTP ${res.status}` }))
+        if (!res.ok || body.code !== 0 || body.success === false) {
+          if (attempt === 0 && res.status === 403 && body.error_code === 'csrf_invalid') {
+            if (!sameAuthSession(sentStatus, getAuthStatus())
+              || !samePasswordCredential(sentCredential, passwordCredential())) throw new Error('Authentication changed')
+            const refresh = readAuthStatus(true)
+            const refreshCredential = passwordCredential()
+            const current = await refresh
+            // setAuthStatus intentionally removes password credentials for OIDC
+            // and SSO-only policy. All other changes still belong to a newer login.
+            const currentCredential = !current.password_enabled || current.auth_method === 'oidc'
+              ? { token: null, expires: null } : refreshCredential
+            if (!sameAuthSession(current, getAuthStatus())
+              || !samePasswordCredential(currentCredential, passwordCredential())) throw new Error('Authentication changed')
+            if (!current.authenticated) {
+              // The fresh read confirms the cookie is already expired/revoked.
+              clearAuthSession()
+              redirectToLogin()
+              return
+            }
+            if (current.auth_method === 'oidc' && current.csrf_token !== sentStatus?.csrf_token) continue
+          }
+          throw new Error(localizedApiError(body, res.status))
+        }
+      }
+      // Never erase a newer session established while this logout was in flight.
+      if (!sameAuthSession(sentStatus, getAuthStatus())
+        || !samePasswordCredential(sentCredential, passwordCredential())) throw new Error('Authentication changed')
+      // Success or 401 confirms there is no old server session left to revoke.
+      clearAuthSession()
+      redirectToLogin()
+      return
+    }
+  })().finally(() => { logoutRequest = null })
+  return logoutRequest
 }
 
 export function isAuthenticated(): boolean {
-  const token = getToken()
-  if (!token) return false
-
-  const expires = localStorage.getItem('token_expires')
-  if (expires && new Date(expires) < new Date()) {
-    logout()
-    return false
-  }
-  return true
+  const status = getAuthStatus()
+  if (!status?.authenticated) return false
+  return status.auth_method === 'oidc' || (status.password_enabled && !!getToken())
 }
 
 export interface ApiRequestOptions extends RequestInit {
@@ -162,12 +314,7 @@ export interface ApiRequestOptions extends RequestInit {
 }
 
 export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Promise<T> {
-  const headers: Record<string, string> = {}
-
-  const token = getToken()
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
+  const headers = authHeaders(options?.method)
 
   if (options?.body) {
     headers['Content-Type'] = 'application/json'
@@ -186,6 +333,7 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     const { timeoutMs: _timeoutMs, ...requestOptions } = options || {}
     res = await fetch(`${API_BASE}${path}`, {
       ...requestOptions,
+      credentials: 'same-origin',
       headers: {
         ...headers,
         ...(requestOptions.headers as Record<string, string> | undefined),
@@ -203,10 +351,7 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     }
   }
 
-  if (res.status === 401 && token) {
-    logout()
-    throw new Error(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
-  }
+  handleUnauthorized(path, res.status)
 
   const body: ApiResponse<T> = await res.json().catch(() => ({
     code: res.status,
