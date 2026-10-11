@@ -25,7 +25,7 @@ on:
       - 'tests/test_analysis_link_settings.py'
       - 'tests/test_tradingagents_report_links.py'
   push:
-    branches: [main]
+    branches: [main, master]
     paths:
       - '.github/workflows/reverse-proxy-subpath.yml'
       - 'requirements*.txt'

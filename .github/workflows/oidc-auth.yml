@@ -10,7 +10,7 @@ on:
       - 'frontend/**'
       - 'docs/oidc-sso*'
   push:
-    branches: [main]
+    branches: [main, master]
     paths:
       - '.github/workflows/oidc-auth.yml'
       - 'requirements*.txt'

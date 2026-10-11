@@ -12,7 +12,7 @@ on:
       - 'tests/**'
       - 'docs/timezones*'
   push:
-    branches: [main]
+    branches: [main, master]
     paths:
       - '.github/workflows/timezones.yml'
       - 'Dockerfile'
