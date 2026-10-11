@@ -13,6 +13,7 @@ const oidcStatus: AuthStatus = {
   ...passwordStatus, oidc_enabled: true, password_enabled: false, authenticated: true,
   auth_method: 'oidc', csrf_token: 'csrf-memory-only', oidc_login_url: 'https://panwatch.example/api/auth/oidc/login',
 }
+const expiredOidcStatus = { ...oidcStatus, authenticated: false, auth_method: null, csrf_token: null }
 const response = (data: unknown, status = 200) => new Response(JSON.stringify({ code: status === 200 ? 0 : status, data }), {
   status, headers: { 'Content-Type': 'application/json' },
 })
@@ -109,7 +110,7 @@ describe('cookie request authentication', () => {
 
   it('expires the cookie session after a protected 401', async () => {
     setAuthStatus(oidcStatus)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(null, 401)))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(response(null, 401)).mockResolvedValueOnce(response(expiredOidcStatus)))
     await expect(fetchAPI('/settings/test')).rejects.toThrow()
     expect(isAuthenticated()).toBe(false)
     expect(getAuthStatus()?.csrf_token).toBeNull()
@@ -136,20 +137,20 @@ describe('cookie request authentication', () => {
 
   it('does not keep reconnecting an expired SSE session', async () => {
     setAuthStatus(oidcStatus)
-    const fetch = vi.fn().mockResolvedValue(response(null, 401))
+    const fetch = vi.fn().mockResolvedValueOnce(response(null, 401)).mockResolvedValueOnce(response(expiredOidcStatus))
     vi.stubGlobal('fetch', fetch)
     const onFailed = vi.fn()
     const onRetry = vi.fn()
     const stop = subscribeSSE('/notifications/stream', { onEvent: vi.fn(), onFailed, onRetry })
     await vi.waitFor(() => expect(onFailed).toHaveBeenCalledTimes(1))
     expect(onRetry).not.toHaveBeenCalled()
-    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
     stop()
   })
 
   it('uses cookie credentials and expires auth for a PDF 401', async () => {
     setAuthStatus(oidcStatus)
-    const fetch = vi.fn().mockResolvedValue(response(null, 401))
+    const fetch = vi.fn().mockResolvedValueOnce(response(null, 401)).mockResolvedValueOnce(response(expiredOidcStatus))
     vi.stubGlobal('fetch', fetch)
     await expect(tradingAgentsApi.downloadAnalysisPdf('TEST', '2026-10-11')).rejects.toThrow()
     expect(fetch.mock.calls[0][1]).toMatchObject({ credentials: 'same-origin', headers: {} })
