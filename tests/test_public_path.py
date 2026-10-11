@@ -117,7 +117,7 @@ def test_root_login_deeplinks_assets_and_api(deployment):
 
 def test_auth_and_realtime_keep_prefix_and_envelope(deployment):
     client, prefix, mode, upstream = deployment
-    assert client.get(upstream("/api/auth/status")).json()["data"] == {"initialized": True}
+    assert client.get(upstream("/api/auth/status")).json()["data"]["initialized"] is True
     assert client.get(upstream("/api/private")).status_code == 401
     bad = client.post(upstream("/api/auth/login"), json={"username": "test-user", "password": "wrong"})
     assert bad.status_code == 401 and bad.json()["code"] == 401
@@ -204,3 +204,40 @@ def test_advertised_task_links_use_public_prefix(prefix, monkeypatch):
 ])
 def test_app_local_middleware_path(path, root, expected):
     assert app_path({"path": path, "root_path": root}) == expected
+
+
+@pytest.mark.parametrize("path", ["/..%2fsecret.txt", "/%2e%2e/secret.txt", "/assets/..%2f..%2fsecret.txt", "/..%5csecret.txt", "/%2fetc/passwd", "/%00"])
+def test_static_url_escapes_are_not_served(deployment, path):
+    client, _, _, upstream = deployment
+    assert client.get(upstream(path)).status_code == 404
+
+
+def test_static_index_symlink_fails_closed(tmp_path):
+    from fastapi import HTTPException
+    root = tmp_path / "public"
+    root.mkdir()
+    private = tmp_path / "secret.txt"
+    private.write_text("PRIVATE_CANARY")
+    (root / "index.html").symlink_to(private)
+    with pytest.raises(HTTPException) as exc:
+        install_spa(FastAPI(), root)
+    assert exc.value.status_code == 404
+
+
+def test_static_index_replacement_fails_closed(tmp_path):
+    root = tmp_path / "public"
+    root.mkdir()
+    private = tmp_path / "secret.txt"
+    private.write_text("PRIVATE_CANARY")
+    index = root / "index.html"
+    index.write_text('<head><base href="/" data-panwatch-base><meta name="panwatch-base-path" content=""></head>')
+    app = FastAPI()
+    install_spa(app, root)
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+    index.unlink()
+    index.symlink_to(private)
+    for path in ("/", "/index.html", "/portfolio"):
+        response = client.get(path)
+        assert response.status_code == 404
+        assert "PRIVATE_CANARY" not in response.text

@@ -47,9 +47,7 @@ Caddyfile (Caddy on the same host as the published container port):
 http://192.0.2.10 {
     redir /apps/panwatch /apps/panwatch/ 308
     handle /apps/panwatch/* {
-        reverse_proxy 127.0.0.1:8000 {
-            flush_interval -1
-        }
+        reverse_proxy 127.0.0.1:8000
     }
     handle {
         respond "Not found" 404
@@ -59,8 +57,10 @@ http://192.0.2.10 {
 
 `handle` preserves the complete request path. In this mode the backend also
 redirects its exact bare prefix to the trailing-slash form, preserving the query
-string. `flush_interval -1` requests prompt response forwarding for SSE; do not
-add another buffering proxy between Caddy and PanWatch. The app currently uses
+string. Caddy automatically flushes `text/event-stream` responses immediately;
+no special flush override is needed. Do not configure `response_buffers` or add
+another buffering proxy between Caddy and PanWatch. Keeping the default also
+avoids the negative flush interval's changed backend-disconnect behavior. The app currently uses
 fetch-based SSE, not WebSockets; this path adapter also preserves ASGI WebSocket
 routing if a WebSocket endpoint is added later.
 
@@ -77,9 +77,7 @@ PANWATCH_PROXY_MODE=strip
 http://192.0.2.10 {
     redir /apps/panwatch /apps/panwatch/ 308
     handle_path /apps/panwatch/* {
-        reverse_proxy 127.0.0.1:8000 {
-            flush_interval -1
-        }
+        reverse_proxy 127.0.0.1:8000
     }
     handle {
         respond "Not found" 404

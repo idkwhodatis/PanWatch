@@ -21,16 +21,29 @@ def render_spa_html(html: str, base_path: str) -> str:
     )
 
 
+def _contained_path(root: Path, relative: str) -> Path:
+    if Path(relative).is_absolute() or "\\" in relative or "\x00" in relative:
+        raise HTTPException(status_code=404)
+    try:
+        candidate = (root / relative).resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=404) from None
+    if not candidate.is_relative_to(root):
+        raise HTTPException(status_code=404)
+    return candidate
+
+
 def install_spa(app: FastAPI, directory: str | Path, base_path: str = "") -> None:
     """Register last, after all API routes; never expose files outside the build."""
     root = Path(directory).resolve()
-    index = render_spa_html((root / "index.html").read_text(encoding="utf-8"), base_path)
+    index = render_spa_html(_contained_path(root, "index.html").read_text(encoding="utf-8"), base_path)
 
     @app.get("/{path:path}", include_in_schema=False)
     async def serve_spa(path: str):
-        candidate = (root / path).resolve()
-        if not candidate.is_relative_to(root):
-            raise HTTPException(status_code=404)
+        candidate = _contained_path(root, path)
+        # A bundle replacement must not turn the public shell into a symlink
+        # outside the build, even though its initial HTML is cached in memory.
+        _contained_path(root, "index.html")
         if path in ("", "index.html"):
             return HTMLResponse(index, headers={"Cache-Control": "no-cache"})
         if candidate.is_file():
