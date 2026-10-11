@@ -1,4 +1,5 @@
 import { interfaceText, isEnglishInterface } from './locale'
+import { clearAuthSession, getAuthStatus } from './auth-session'
 
 const API_BASE = '/api'
 const DEFAULT_TIMEOUT_MS = 20000
@@ -55,6 +56,11 @@ const API_ERROR_TEXT_EN: Record<string, string> = {
   auth_already_configured: 'An account is already configured. Use the sign-in endpoint instead.',
   auth_not_configured: 'Set up an account before signing in.',
   auth_required: 'Sign in to continue.',
+  auth_expired: 'Your session has expired. Sign in again.',
+  password_login_disabled: 'Password sign-in is disabled. Continue with SSO.',
+  auth_setup_disabled: 'Password setup is disabled for this installation.',
+  csrf_invalid: 'Your session changed or the request could not be verified. Refresh the page and try again.',
+  oidc_not_configured: 'SSO is not configured correctly. Contact the installation owner.',
   avatar_data_invalid: 'The avatar data is invalid.',
   avatar_data_url_invalid: 'The avatar must be a data URL.',
   board_code_required: 'Enter a sector code.',
@@ -134,25 +140,77 @@ export function localizedApiError(body: ApiResponse<unknown>, status: number): s
 }
 
 export function getToken(): string | null {
+  const status = getAuthStatus()
+  if (status && (!status.password_enabled || status.auth_method === 'oidc')) return null
+  const expires = localStorage.getItem('token_expires')
+  if (expires && new Date(expires).getTime() <= Date.now()) {
+    localStorage.removeItem('token')
+    localStorage.removeItem('token_expires')
+    return null
+  }
   return localStorage.getItem('token')
 }
 
-export function logout() {
-  localStorage.removeItem('token')
-  localStorage.removeItem('token_expires')
-  window.location.href = '/login'
+export function authHeaders(method = 'GET'): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  const status = getAuthStatus()
+  if (status?.authenticated && status.auth_method === 'oidc'
+    && !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase()) && status.csrf_token) {
+    headers['X-CSRF-Token'] = status.csrf_token
+  }
+  return headers
+}
+
+function redirectToLogin() {
+  // Auth failures on the login/status endpoints must never reload the login page.
+  if (window.location.pathname !== '/login') window.location.href = '/login'
+}
+
+export class AuthExpiredError extends Error {}
+
+export function handleUnauthorized(path: string, status: number): void {
+  if (status !== 401 || ['/auth/status', '/auth/login', '/auth/setup', '/auth/logout'].includes(path.split('?')[0])) return
+  clearAuthSession()
+  redirectToLogin()
+  throw new AuthExpiredError(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
+}
+
+let logoutRequest: Promise<void> | null = null
+
+export function logout(): Promise<void> {
+  if (logoutRequest) return logoutRequest
+  logoutRequest = (async () => {
+    // Keep the verified session and CSRF token until server logout succeeds.
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    let res: Response
+    try {
+      res = await fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: authHeaders('POST'),
+        signal: controller.signal,
+      })
+    } finally {
+      window.clearTimeout(timeout)
+    }
+    if (res.status !== 401) {
+      const body: ApiResponse<unknown> = await res.json().catch(() => ({ code: res.status, data: null, message: `HTTP ${res.status}` }))
+      if (!res.ok || body.code !== 0 || body.success === false) throw new Error(localizedApiError(body, res.status))
+    }
+    // 401 confirms the session is already expired; there is nothing left to revoke.
+    clearAuthSession()
+    redirectToLogin()
+  })().finally(() => { logoutRequest = null })
+  return logoutRequest
 }
 
 export function isAuthenticated(): boolean {
-  const token = getToken()
-  if (!token) return false
-
-  const expires = localStorage.getItem('token_expires')
-  if (expires && new Date(expires) < new Date()) {
-    logout()
-    return false
-  }
-  return true
+  const status = getAuthStatus()
+  if (!status?.authenticated) return false
+  return status.auth_method === 'oidc' || (status.password_enabled && !!getToken())
 }
 
 export interface ApiRequestOptions extends RequestInit {
@@ -160,12 +218,7 @@ export interface ApiRequestOptions extends RequestInit {
 }
 
 export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Promise<T> {
-  const headers: Record<string, string> = {}
-
-  const token = getToken()
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
+  const headers = authHeaders(options?.method)
 
   if (options?.body) {
     headers['Content-Type'] = 'application/json'
@@ -184,6 +237,7 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     const { timeoutMs: _timeoutMs, ...requestOptions } = options || {}
     res = await fetch(`${API_BASE}${path}`, {
       ...requestOptions,
+      credentials: 'same-origin',
       headers: {
         ...headers,
         ...(requestOptions.headers as Record<string, string> | undefined),
@@ -201,10 +255,7 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     }
   }
 
-  if (res.status === 401 && token) {
-    logout()
-    throw new Error(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
-  }
+  handleUnauthorized(path, res.status)
 
   const body: ApiResponse<T> = await res.json().catch(() => ({
     code: res.status,

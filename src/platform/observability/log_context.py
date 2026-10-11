@@ -7,6 +7,7 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
+from urllib.parse import unquote
 
 
 _trace_id_var: ContextVar[str] = ContextVar("log_trace_id", default="")
@@ -121,6 +122,17 @@ def install_log_record_factory() -> None:
 
     def record_factory(*args, **kwargs):
         record = old_factory(*args, **kwargs)
+        # Access logging runs after the route context exits. Redact callback URLs
+        # before every console/database/export sink, including encoded prefixes.
+        if record.name in {"uvicorn.access", "httpx"}:
+            try:
+                callback_access = "/api/auth/oidc/callback" in unquote(record.getMessage())
+            except (TypeError, ValueError):
+                callback_access = False
+            if callback_access:
+                record.msg = "OIDC callback HTTP access (details redacted)"
+                record.args = ()
+                record.exc_info = record.exc_text = record.stack_info = None
         if _redact_http_logs_var.get() and (
             record.name in {"httpx", "httpcore"}
             or record.name.startswith(("httpx.", "httpcore."))
