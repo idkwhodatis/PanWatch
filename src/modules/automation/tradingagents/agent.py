@@ -188,7 +188,12 @@ class TradingAgentsAgent(BaseAgent):
 
         # A 股 fetch 真实财报(akshare),非 A 股留空
         financial: dict | None = None
-        if stock.market.value == "CN" and stock.symbol.isdigit() and len(stock.symbol) == 6:
+        if (
+            stock.market.value == "CN"
+            and getattr(stock, "asset_type", "stock") != "etf"
+            and stock.symbol.isdigit()
+            and len(stock.symbol) == 6
+        ):
             try:
                 from src.modules.automation.tradingagents.data_context import fetch_financial_abstract
                 financial = await _source(
@@ -321,6 +326,7 @@ class TradingAgentsAgent(BaseAgent):
             industry=quote_data.get("industry", "") if isinstance(quote_data, dict) else "",
             **({key: quote_data.get(key) for key in ("currency", "security_type", "source_timestamp")}
                if stock.market.value in {"TSX", "TSXV"} else {}),
+            asset_type=getattr(stock, "asset_type", None),
         )
         # 5) 同步阻塞,丢到线程池;加硬超时防卡死
         try:
@@ -369,6 +375,7 @@ class TradingAgentsAgent(BaseAgent):
             model_label=context.model_label,
             output_language=output_language,
         )
+        result.raw_data["asset_type"] = stock.asset_type
 
         # 存分析时实时价 → 历史决策表"分析价"立即显示(不必等当日 K线收盘回填)
         _quote = data.get("quote") or {}
@@ -497,6 +504,8 @@ class TradingAgentsAgent(BaseAgent):
             return None
         recorded_market = history.raw_data.get("market")
         if recorded_market and recorded_market != stock.market.value:
+            return None
+        if history.raw_data.get("asset_type", "stock") != stock.asset_type:
             return None
         return AnalysisResult(
             agent_name=self.name,
