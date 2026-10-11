@@ -279,15 +279,34 @@ function readAuthStatus(fresh = false, signal?: AbortSignal): Promise<AuthStatus
   }
   if (statusRequest && !signal) return statusRequest
   const revision = getAuthRevision()
+  const previous = getAuthStatus()
+  const passwordSuppressed = !!previous && (!previous.password_enabled || previous.auth_method === 'oidc')
   const response = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' })
   // Header construction can discard an already expired token. Snapshot after it.
   const sentCredential = passwordCredential()
-  const request = response.then(validateAuthStatus).then(status => {
+  const changedStatus = (): AuthStatus | null => {
     if (signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError')
     if (revision !== getAuthRevision() || !samePasswordCredential(sentCredential, passwordCredential())) {
       const current = getAuthStatus()
       if (fresh || !current) throw new Error('Authentication changed')
       return current
+    }
+    return null
+  }
+  const request = response.then(validateAuthStatus).then(async status => {
+    const changed = changedStatus()
+    if (changed) return changed
+    // Another tab can finish password login while this tab still remembers OIDC.
+    // Preserve cookie priority: only test the suppressed bearer after the server
+    // confirms no cookie session and allows password fallback. Never replay the
+    // protected operation or publish an unverified password session locally.
+    if (passwordSuppressed && !status.authenticated && status.password_enabled && sentCredential?.token
+      && !(sentCredential.expires && new Date(sentCredential.expires).getTime() <= Date.now())) {
+      status = validateAuthStatus(await fetchAPI<AuthStatus>('/auth/status', {
+        cache: 'no-store', headers: { Authorization: `Bearer ${sentCredential.token}` },
+      }))
+      const changed = changedStatus()
+      if (changed) return changed
     }
     setAuthStatus(status)
     return status

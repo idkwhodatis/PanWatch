@@ -27,11 +27,14 @@ function expectFootnoteLinks(documentUrl: string) {
   const back = document.querySelector<HTMLAnchorElement>('a[data-footnote-backref]')!
   expect(ref).toBeTruthy()
   expect(back).toBeTruthy()
-  expect(ref.href).toBe(`${documentUrl}#user-content-fn-source`)
-  expect(back.href).toBe(`${documentUrl}#user-content-fnref-source`)
-  expect(document.getElementById('user-content-fn-source')).toBeTruthy()
-  expect(document.getElementById('user-content-fnref-source')).toBe(ref)
-  expect(document.getElementById(ref.getAttribute('aria-describedby')!)).toBeTruthy()
+  const prefix = ref.id.slice(0, -'fnref-source'.length)
+  expect(prefix).toMatch(/^user-content-.+-$/)
+  expect(ref.href).toBe(`${documentUrl}#${prefix}fn-source`)
+  expect(back.href).toBe(`${documentUrl}#${ref.id}`)
+  expect(document.getElementById(`${prefix}fn-source`)).toBeTruthy()
+  expect(document.getElementById(ref.id)).toBe(ref)
+  expect(ref.getAttribute('aria-describedby')).toBe(`${prefix}footnote-label`)
+  expect(document.getElementById(`${prefix}footnote-label`)).toBeTruthy()
   expect(back.getAttribute('aria-label')).toBe('Back to reference 1')
   expect(back.classList.contains('data-footnote-backref')).toBe(true)
   return { ref, back }
@@ -61,9 +64,9 @@ describe.each(['', '/panwatch', '/apps/panwatch'])('Markdown fragments at public
     document.addEventListener('click', captureDefault)
     try {
       await user.click(ref)
-      await waitFor(() => expect(window.location.href).toBe(`${current}#user-content-fn-source`))
+      await waitFor(() => expect(window.location.href).toBe(ref.href))
       await user.click(back)
-      await waitFor(() => expect(window.location.href).toBe(`${current}#user-content-fnref-source`))
+      await waitFor(() => expect(window.location.href).toBe(back.href))
       expect(canceled).toEqual([false, false])
     } finally {
       document.removeEventListener('click', captureDefault)
