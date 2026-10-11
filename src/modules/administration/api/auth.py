@@ -240,7 +240,10 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
             oidc.check_csrf(request, session, config)
             db.delete(session)
             db.commit()
-        response.delete_cookie(config.session_cookie, path=config.cookie_path, secure=config.secure_cookie, httponly=True, samesite="lax")
+        # Revocation is authoritative in the database. Do not expire the shared
+        # browser cookie: this response may arrive after another tab signs in,
+        # and Set-Cookie cannot conditionally delete only the old identifier.
+        # The now-inert cookie expires naturally or is replaced by a new login.
     return {"logged_out": True}
 
 

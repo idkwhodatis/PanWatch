@@ -61,6 +61,8 @@ OIDC_ALLOWED_ENDPOINT_ORIGINS=["https://tokens.identity.example.com","https://ke
 
 本地 Cookie 是随机不透明会话 ID；数据库仅保存其哈希、CSRF token、所有者身份、配置绑定和绝对过期时间。重启后仍有效；过期、issuer/client/public URL 变化或移除允许的 sub 后拒绝访问。登录时清理过期行，新登录会撤销该浏览器的旧会话。
 
+退出只在 SQLite 中撤销会话，不删除浏览器 Cookie；回调只消费匹配的一次性登录事务，不删除绑定 Cookie。延迟到达的响应无法安全地删除共享 Cookie，因为另一标签页可能已经写入新会话或新登录事务。这些保留的不透明值按原期限自然过期（会话为配置的有效期，事务为十分钟），或被下次登录替换；它们不代表仍然有效的会话或可重用的事务。服务端拒绝已撤销、已消费或过期的状态，包括 API 请求和 SSE 重连。没有有效会话的退出请求不会改变 Cookie 或会话。
+
 退出是 CSRF 保护的 POST，会撤销本地会话，不会退出提供方或其他应用。提供方可能在下次登录时直接放行，共用电脑上请使用提供方自己的退出入口。提供方侧停用/退出不会即时撤销已存在的 PanWatch 会话；删除允许的 sub 并重启应用即可使该身份失效。不支持 back-channel logout 或刷新 token。
 
 MCP 仍使用现有带 scope 的 `pwmcp_` PAT，按自己的过期和撤销规则工作；OIDC 不是 MCP OAuth Server。普通 REST 客户端可使用同源 Cookie/status/CSRF 流程，或在显式允许密码备用时继续使用原密码 bearer-token 流程。提供方 ID/access token 不能直接作为 PanWatch bearer token。

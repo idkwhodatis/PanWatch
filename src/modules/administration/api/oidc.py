@@ -22,10 +22,6 @@ def _redirect(config: oidc.OIDCConfig, error: str | None = None) -> RedirectResp
     return response
 
 
-def _clear_transaction(response: RedirectResponse, config: oidc.OIDCConfig) -> None:
-    response.delete_cookie(config.transaction_cookie, path=config.cookie_path, secure=config.secure_cookie, httponly=True, samesite="lax")
-
-
 @router.get("/login")
 def login(request: Request, db: Session = Depends(get_db)):
     config = oidc.require_config()
@@ -67,5 +63,8 @@ def callback(request: Request, db: Session = Depends(get_db)):
     except (oidc.OIDCError, httpx.HTTPError, jwt.PyJWTError, ValueError, TypeError, KeyError):
         logger.warning("OIDC callback validation failed")
         response = _redirect(config, "failed")
-    _clear_transaction(response, config)
+    # consume_transaction invalidates the matching one-use row. Never clear the
+    # shared binding cookie here, even for a valid callback: a delayed response
+    # could erase a newer login's binding. It expires after ten minutes or is
+    # replaced by the next start; a retained binding cannot replay a used row.
     return response

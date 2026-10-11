@@ -391,7 +391,9 @@ def test_live_sse_stops_delivering_after_session_revocation_or_expiry(client, ap
     result = client.get('/api/revocation-stream')
     assert 'data: before' in result.text
     assert 'AFTER_REVOKE_CANARY' not in result.text
+    assert client.cookies.get(oidc.get_config().session_cookie)
     assert client.get('/api/private').status_code == 401
+    assert client.get('/api/revocation-stream').status_code == 401
 
 
 @pytest.mark.parametrize('public_url', ['https://Portfolio.Example:443', 'https://portfolio.example:443/'])
@@ -459,13 +461,15 @@ def test_nested_login_ignores_ancestor_cookies(app, db, provider, monkeypatch, a
         assert started.headers['set-cookie'].startswith(config.transaction_cookie + '=')
         callback = nested.get('api/auth/oidc/callback', params={'state': params['state'][0], 'code': 'mock-code'})
         assert callback.headers['location'] == ORIGIN + prefix + '/'
-        assert config.transaction_cookie not in nested.cookies
+        assert config.transaction_cookie in nested.cookies
+        assert db.query(OIDCLoginTransaction).count() == 0
         status = data(nested.get('api/auth/status'))
         assert status['authenticated']
         old = nested.cookies[config.session_cookie]
         headers = {'Origin': ORIGIN, 'X-CSRF-Token': status['csrf_token']}
         assert nested.post('api/auth/logout', headers=headers).status_code == 200
-        assert config.session_cookie not in nested.cookies
+        assert nested.cookies[config.session_cookie] == old
+        assert not data(nested.get('api/auth/status'))['authenticated']
         assert nested.cookies[legacy_name] == 'ancestor-cookie'
         assert not db.query(OIDCSession).filter_by(session_hash=oidc.digest(old)).count()
 
@@ -495,7 +499,7 @@ def test_authenticated_root_to_subpath_migration(app, client, db, provider, monk
         assert db.query(OIDCSession).filter_by(session_hash=oidc.digest(root_cookie)).count() == 1
 
 
-def test_nested_transaction_rotation_and_cancel_only_clear_own_cookie(app, db, provider, monkeypatch):
+def test_nested_transaction_rotation_and_cancel_revoke_only_own_state(app, db, provider, monkeypatch):
     prefix = '/apps/panwatch'
     monkeypatch.setenv('PANWATCH_BASE_PATH', prefix)
     monkeypatch.setenv('OIDC_PUBLIC_URL', ORIGIN + prefix)
@@ -510,7 +514,8 @@ def test_nested_transaction_rotation_and_cancel_only_clear_own_cookie(app, db, p
         state = parse_qs(urlsplit(second.headers['location']).query)['state'][0]
         result = nested.get('api/auth/oidc/callback', params={'state': state, 'error': 'access_denied'})
         assert result.headers['location'].endswith('oidc_error=cancelled')
-        assert config.transaction_cookie not in nested.cookies
+        assert config.transaction_cookie in nested.cookies
+        assert 'set-cookie' not in result.headers
         assert nested.cookies[oidc.TRANSACTION_COOKIE] == 'root-transaction'
         assert db.query(OIDCLoginTransaction).count() == 0
 
