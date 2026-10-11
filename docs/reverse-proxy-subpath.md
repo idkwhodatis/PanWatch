@@ -151,12 +151,17 @@ service worker may control the first load of the new path. Unregister that old
 PanWatch worker and remove its old `panwatch-v2` cache in browser developer tools
 (or clear this site's data) before migrating; this also signs you out. Update
 bookmarks and reinstall the PWA if its old installation starts at `/`. If you
-use notification analysis links, also update the existing `panwatch_base_url`
-system setting or `PANWATCH_BASE_URL` to the complete public URL, for example
+use notification analysis links, also update and save `panwatch_base_url` in
+**Settings → System** to the complete public URL, for example
 `https://your-host/apps/panwatch` (or the matching trusted-network HTTP URL).
-That separate setting already expects a full URL and is not automatically
-prefixed, so an old root URL would continue producing old root links. Other
-applications' workers/caches are not removed automatically. Switching between
+The saved database setting takes precedence over `PANWATCH_BASE_URL`: changing
+that environment variable or restarting does not replace an existing saved
+value, including an empty one. `PANWATCH_BASE_URL` is only an initial default
+used when Settings first creates a missing setting. On a fresh installation,
+open Settings to initialize it and verify the saved value before relying on
+notification links. This separate setting expects a full URL and is not
+automatically prefixed, so an old root URL continues producing old root links.
+Other applications' workers/caches are not removed automatically. Switching between
 different prefixes on one origin does not create a browser security boundary;
 use separate origins for mutually untrusted apps or independent users.
 

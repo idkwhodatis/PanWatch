@@ -71,15 +71,18 @@ it.each(['', '/panwatch', '/apps/panwatch'])('keeps OIDC API, stream, PDF and lo
 it.each(['', '/panwatch', '/apps/panwatch'])('redirects expired sessions once to the canonical %s login page', async prefix => {
   const location = browserAt(prefix)
   const { getAuthStatus } = await signIn(prefix)
-  const { handleUnauthorized } = await import('../../packages/api/src/client')
-  expect(() => handleUnauthorized('/accounts', 401)).toThrow()
+  const { authHeaders, captureAuthRequest, handleUnauthorized } = await import('../../packages/api/src/client')
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ code: 0, data: {
+    ...getAuthStatus(), authenticated: false, auth_method: null, csrf_token: null,
+  } }))))
+  await expect(handleUnauthorized('/accounts', 401, captureAuthRequest(authHeaders()))).rejects.toThrow()
   expect(getAuthStatus()?.authenticated).toBe(false)
   expect(location.href).toBe(`${prefix}/login`)
 
   location.pathname = `${prefix}/login`
   location.href = ''
-  expect(() => handleUnauthorized('/accounts', 401)).toThrow()
+  await expect(handleUnauthorized('/accounts', 401, captureAuthRequest(authHeaders()))).rejects.toThrow()
   expect(location.href).toBe('')
-  expect(() => handleUnauthorized('/auth/status', 401)).not.toThrow()
+  await expect(handleUnauthorized('/auth/status', 401, captureAuthRequest(authHeaders()))).resolves.toBeUndefined()
   expect(location.href).toBe('')
 })

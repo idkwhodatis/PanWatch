@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@panwatch/base-ui/components/markdown'
 import remarkGfm from 'remark-gfm'
 
 const REMARK_PLUGINS = [remarkGfm]
@@ -15,7 +15,7 @@ export function safeStreamMarkdown(text: string): string {
 export const AssistantMarkdown = memo(function AssistantMarkdown({ content, streaming = false }: { content: string; streaming?: boolean }) {
   return (
     <div className={MARKDOWN_CLASS}>
-      <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{streaming ? safeStreamMarkdown(content) : content}</ReactMarkdown>
+      <Markdown remarkPlugins={REMARK_PLUGINS}>{streaming ? safeStreamMarkdown(content) : content}</Markdown>
     </div>
   )
 })

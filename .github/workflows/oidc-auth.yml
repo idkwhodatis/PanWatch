@@ -47,5 +47,5 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - run: pnpm run test --run tests/auth tests/api/oidcAuth.test.ts tests/api/passwordLogout.test.ts tests/api/oidc-public-path.test.ts tests/api/public-url.test.ts tests/api/health.test.ts tests/api/recommendations.test.ts tests/api/global-overview.test.ts tests/i18n/Login.test.tsx
+      - run: pnpm run test --run tests/auth tests/api/oidcAuth.test.ts tests/api/passwordLogout.test.ts tests/api/unauthorizedSession.test.ts tests/api/oidc-public-path.test.ts tests/api/public-url.test.ts tests/api/health.test.ts tests/api/recommendations.test.ts tests/api/global-overview.test.ts tests/i18n/Login.test.tsx
       - run: pnpm run check:i18n && pnpm run check:market-colors && pnpm run build

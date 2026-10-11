@@ -1,7 +1,7 @@
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
 import { useEffect, useState, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@panwatch/base-ui/components/markdown'
 import remarkGfm from 'remark-gfm'
 import {
   ArrowLeft,
@@ -368,9 +368,9 @@ export default function AnalysisDetailPage() {
                   {s.title}
                 </h2>
                 <div className="prose prose-base dark:prose-invert max-w-none leading-relaxed prose-headings:mt-6 prose-headings:mb-2 prose-h2:text-[16px] prose-h3:text-[15px] prose-h4:text-[14px] prose-h2:font-semibold prose-h3:font-semibold prose-p:my-3 prose-p:text-foreground/90 prose-li:my-1 prose-table:my-4 prose-th:px-3 prose-th:py-2 prose-td:px-3 prose-td:py-2 prose-strong:text-foreground">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={headingComponents(s.id)}>
+                  <Markdown remarkPlugins={[remarkGfm]} components={headingComponents(s.id)}>
                     {s.markdown}
-                  </ReactMarkdown>
+                  </Markdown>
                 </div>
               </section>
             )

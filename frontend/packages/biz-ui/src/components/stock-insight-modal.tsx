@@ -3,7 +3,7 @@ import { publicUrl } from '@panwatch/api/base-path'
 import { AnalysisMetadata } from './analysis-metadata'
 import { aggregateInsightHolding, reportMatchesStock, reportSuggestionForStock, reportSymbolQueries, type InsightHolding, type InsightPortfolioPosition } from './stock-insight-data'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@panwatch/base-ui/components/markdown'
 import { Copy, Download, ExternalLink, RefreshCw, Share2, Sparkles } from 'lucide-react'
 import {
   insightApi,
@@ -1733,7 +1733,7 @@ function StockInsightSession(props: StockInsightModalProps & { autoTriggered: Re
                     )}
                     <div className="rounded-lg bg-accent/10 p-3">
                       <div className="prose prose-sm dark:prose-invert max-w-none text-foreground/90 break-words">
-                        <ReactMarkdown>{activeReport.content || tr('cards.noReportContent')}</ReactMarkdown>
+                        <Markdown>{activeReport.content || tr('cards.noReportContent')}</Markdown>
                       </div>
                     </div>
                     {(activeReport.prompt_context || activeReport.context_payload || activeReport.news_debug) && (
@@ -2024,7 +2024,7 @@ function DeepAnalysisSection({
       {result?.content && (
         <div className="rounded-lg border border-border/50 p-4">
           <div className="prose prose-sm dark:prose-invert max-w-none break-words">
-            <ReactMarkdown>{result.content}</ReactMarkdown>
+            <Markdown>{result.content}</Markdown>
           </div>
         </div>
       )}

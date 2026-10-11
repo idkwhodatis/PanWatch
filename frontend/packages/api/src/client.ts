@@ -174,8 +174,74 @@ function redirectToLogin() {
 
 export class AuthExpiredError extends Error {}
 
-export function handleUnauthorized(path: string, status: number): void {
+/** An obsolete or unverifiable request must fail without ending the current session. */
+export class AuthChangedError extends Error {
+  constructor() {
+    super(interfaceText('登录状态已变化或无法确认，请重试', 'Your session changed or could not be verified. Try again.'))
+  }
+}
+
+export interface AuthRequestSnapshot {
+  revision: number
+  credential: PasswordCredential | null
+  status: AuthStatus | null
+  usesSessionAuthorization: boolean
+  signal?: AbortSignal
+}
+
+/** Call after header construction, which may discard an already expired token. */
+export function captureAuthRequest(headers: HeadersInit, signal?: AbortSignal): AuthRequestSnapshot {
+  const credential = passwordCredential()
+  const status = getAuthStatus()
+  const token = status && (!status.password_enabled || status.auth_method === 'oidc') ? null : credential?.token
+  return {
+    revision: getAuthRevision(), credential, status, signal,
+    usesSessionAuthorization: new Headers(headers).get('Authorization') === (token ? `Bearer ${token}` : null),
+  }
+}
+
+function isCurrentAuthRequest(sent: AuthRequestSnapshot): boolean {
+  const current = passwordCredential()
+  // Another request may have removed this same expired token while we waited.
+  // An empty current pair is safe; a replacement token/expiry is never erased.
+  const expiredAndRemoved = current?.token === null && current.expires === null
+    && !!sent.credential?.expires && new Date(sent.credential.expires).getTime() <= Date.now()
+  return sent.revision === getAuthRevision() && sent.usesSessionAuthorization
+    && (samePasswordCredential(sent.credential, current) || expiredAndRemoved)
+}
+
+function checkAuthRequestAbort(sent: AuthRequestSnapshot): void {
+  if (sent.signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError')
+}
+
+export async function handleUnauthorized(path: string, status: number, sent: AuthRequestSnapshot): Promise<void> {
   if (status !== 401 || ['/auth/status', '/auth/login', '/auth/setup', '/auth/logout'].includes(path.split('?')[0])) return
+  checkAuthRequestAbort(sent)
+  if (!isCurrentAuthRequest(sent)) throw new AuthChangedError()
+
+  if (!sent.status || sent.status.oidc_enabled) {
+    // HttpOnly cookies can rotate in another tab without any local notification.
+    // Verify once with today's cookie, never replaying the rejected operation.
+    const verification = readAuthStatus(true, sent.signal)
+    const revision = getAuthRevision()
+    const credential = passwordCredential()
+    let current: AuthStatus
+    try {
+      current = await verification
+    } catch {
+      checkAuthRequestAbort(sent)
+      throw new AuthChangedError()
+    }
+    checkAuthRequestAbort(sent)
+    const expectedCredential = !current.password_enabled || current.auth_method === 'oidc'
+      ? { token: null, expires: null } : credential
+    // Publishing status notifies subscribers synchronously; one may establish a
+    // newer login. Only the single verified publication may advance this read.
+    if (getAuthRevision() !== revision + 1 || getAuthStatus() !== current
+      || !samePasswordCredential(expectedCredential, passwordCredential()) || current.authenticated) {
+      throw new AuthChangedError()
+    }
+  }
   clearAuthSession()
   redirectToLogin()
   throw new AuthExpiredError(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
@@ -204,19 +270,20 @@ function samePasswordCredential(left: PasswordCredential | null, right: Password
 
 let statusRequest: Promise<AuthStatus> | null = null
 
-function readAuthStatus(fresh = false): Promise<AuthStatus> {
+function readAuthStatus(fresh = false, signal?: AbortSignal): Promise<AuthStatus> {
   if (fresh) {
     // A status request started before a rejected logout may still contain the
     // old cookie's CSRF token. Do not reuse it or let it replace this fresh read.
     invalidateAuthStatusRequests()
     statusRequest = null
   }
-  if (statusRequest) return statusRequest
+  if (statusRequest && !signal) return statusRequest
   const revision = getAuthRevision()
   const response = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' })
   // Header construction can discard an already expired token. Snapshot after it.
   const sentCredential = passwordCredential()
   const request = response.then(validateAuthStatus).then(status => {
+    if (signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError')
     if (revision !== getAuthRevision() || !samePasswordCredential(sentCredential, passwordCredential())) {
       const current = getAuthStatus()
       if (fresh || !current) throw new Error('Authentication changed')
@@ -228,7 +295,9 @@ function readAuthStatus(fresh = false): Promise<AuthStatus> {
     // An older request must not clear the newer in-flight request's dedup guard.
     if (statusRequest === request) statusRequest = null
   })
-  statusRequest = request
+  // Cancellation belongs to the protected operation, not unrelated status
+  // consumers. Keep abort-bound verification out of the shared dedup promise.
+  if (!signal) statusRequest = request
   return request
 }
 
@@ -319,6 +388,11 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
   if (options?.body) {
     headers['Content-Type'] = 'application/json'
   }
+  new Headers(options?.headers).forEach((value, key) => {
+    const existing = Object.keys(headers).find(name => name.toLowerCase() === key)
+    if (existing) delete headers[existing]
+    headers[key] = value
+  })
 
   const timeoutController = options?.signal ? null : new AbortController()
   const timeoutMs = typeof options?.timeoutMs === 'number' && options.timeoutMs > 0
@@ -328,16 +402,14 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     ? window.setTimeout(() => timeoutController.abort(), timeoutMs)
     : null
 
+  const sentAuth = captureAuthRequest(headers, options?.signal || timeoutController?.signal)
   let res: Response
   try {
     const { timeoutMs: _timeoutMs, ...requestOptions } = options || {}
     res = await fetch(`${API_BASE}${path}`, {
       ...requestOptions,
       credentials: 'same-origin',
-      headers: {
-        ...headers,
-        ...(requestOptions.headers as Record<string, string> | undefined),
-      },
+      headers,
       signal: requestOptions.signal || timeoutController?.signal,
     })
   } catch (error: any) {
@@ -351,7 +423,7 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     }
   }
 
-  handleUnauthorized(path, res.status)
+  await handleUnauthorized(path, res.status, sentAuth)
 
   const body: ApiResponse<T> = await res.json().catch(() => ({
     code: res.status,
