@@ -1,4 +1,5 @@
 import { useRequestScope } from './use-request-scope'
+import { publicUrl } from '@panwatch/api/base-path'
 import { AnalysisMetadata } from './analysis-metadata'
 import { aggregateInsightHolding, reportMatchesStock, reportSuggestionForStock, reportSymbolQueries, type InsightHolding, type InsightPortfolioPosition } from './stock-insight-data'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -1779,7 +1780,7 @@ function StockInsightSession(props: StockInsightModalProps & { autoTriggered: Re
                       className="h-8 px-2.5"
                       onClick={() =>
                         window.open(
-                          `/analysis/${encodeURIComponent(market === 'TSX' || market === 'TSXV' ? `${market}:${symbol}` : symbol)}/${deepResult.timestamp ? String(deepResult.timestamp).slice(0, 10) : new Date().toISOString().slice(0, 10)}`,
+                          publicUrl(`/analysis/${encodeURIComponent(market === 'TSX' || market === 'TSXV' ? `${market}:${symbol}` : symbol)}/${deepResult.timestamp ? String(deepResult.timestamp).slice(0, 10) : new Date().toISOString().slice(0, 10)}`),
                           '_blank',
                         )
                       }

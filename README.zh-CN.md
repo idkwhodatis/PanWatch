@@ -347,3 +347,8 @@ PanWatch 完全免费开源。如果它节省了你的时间或改善了工作�
 ### 全球市场概览
 
 首页支持九个可配置市场分组及29项指数、期货、加密货币和国债收益率观测，可调整显示和排序。请参阅[数据覆盖、时效、许可和分叉同步说明](docs/features/global-overview.md)。公共来源仅提供延迟／每日参考数据；公开或商业再分发前须核实许可。
+
+### Reverse-proxy subpaths / 反向代理子路径
+
+Set `PANWATCH_BASE_PATH=/apps/panwatch` at runtime to host PanWatch under a subpath.
+See [Caddy, Podman, prefix-preserving and prefix-stripping examples](docs/reverse-proxy-subpath.md).
