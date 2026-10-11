@@ -60,8 +60,14 @@ def test_production_assets_and_pwa_are_confined_to_prefix(prefix, mode):
     for name in ("manifest.json", "manifest.zh-CN.json"):
         manifest_url = prefix + "/" + name
         manifest = get_public(manifest_url).json()
-        for field in ("id", "start_url", "scope"):
+        for field in ("start_url", "scope"):
             assert urljoin(manifest_url, manifest[field]) == prefix + "/"
+        origin = "https://panwatch.example"
+        start_url = urljoin(origin + manifest_url, manifest["start_url"])
+        # Manifest id resolves against start_url's ORIGIN, not manifest_url.
+        # Omitting it inherits start_url and keeps root/nested installs distinct.
+        identity = urljoin(origin + "/", manifest["id"]) if manifest.get("id") else start_url
+        assert identity == origin + prefix + "/"
         for icon in manifest["icons"]:
             assert get_public(urljoin(manifest_url, icon["src"])).status_code == 200
     assert get_public(prefix + "/sw.js").headers["cache-control"] == "no-cache"

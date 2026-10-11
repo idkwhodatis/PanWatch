@@ -45,7 +45,7 @@ Caddyfile (Caddy on the same host as the published container port):
 
 ```caddyfile
 http://192.0.2.10 {
-    redir /apps/panwatch /apps/panwatch/ 308
+    redir /apps/panwatch /apps/panwatch/{?query} 308
     handle /apps/panwatch/* {
         reverse_proxy 127.0.0.1:8000
     }
@@ -57,7 +57,9 @@ http://192.0.2.10 {
 
 `handle` preserves the complete request path. In this mode the backend also
 redirects its exact bare prefix to the trailing-slash form, preserving the query
-string. Caddy automatically flushes `text/event-stream` responses immediately;
+string. Both Caddy examples use `{?query}` to retain the original query string
+(including its `?` only when present). Caddy automatically flushes
+`text/event-stream` responses immediately;
 no special flush override is needed. Do not configure `response_buffers` or add
 another buffering proxy between Caddy and PanWatch. Keeping the default also
 avoids the negative flush interval's changed backend-disconnect behavior. The app currently uses
@@ -75,7 +77,7 @@ PANWATCH_PROXY_MODE=strip
 
 ```caddyfile
 http://192.0.2.10 {
-    redir /apps/panwatch /apps/panwatch/ 308
+    redir /apps/panwatch /apps/panwatch/{?query} 308
     handle_path /apps/panwatch/* {
         reverse_proxy 127.0.0.1:8000
     }
@@ -125,13 +127,20 @@ Open `http://192.0.2.10/apps/panwatch/`, then directly open/reload
 - `/apps/panwatch/docs`, `/apps/panwatch/openapi.json`, and
   `/apps/panwatch/.well-known/oauth-protected-resource` are reachable.
 - The MCP endpoint shown in settings is `/apps/panwatch/mcp`.
+  Its 401 response advertises the absolute, prefixed metadata URL in
+  `WWW-Authenticate: Bearer resource_metadata="..."`. Clients should follow that
+  challenge rather than require an origin-root `/.well-known/` route. This is
+  discovery for the existing PAT authentication, not an OAuth authorization server.
 - With preserve mode, unprefixed backend `/api/health` returns 404. With strip
   mode, test the public proxy URL instead: only that URL should be exposed.
 
 The server injects one validated base into `index.html`; React Router uses it as
 its basename, while API/direct-download/SSE requests share `publicUrl()`.
-Manifests use relative `start_url`, `scope`, `id`, and icon URLs. Service-worker
-caches are isolated by public path and limited to the public root shell, known
+Manifests use relative `start_url`, `scope`, and icon URLs; they omit `id` so the
+browser uses the resolved `start_url` as the distinct identity of each prefix.
+Using the same relative `id` in each deployment would resolve against the origin
+and merge these installations. Service-worker caches are isolated by public path
+and limited to the public root shell, known
 PWA files and bundled assets. They never delete another app's caches or cache
 API/auth/protocol responses, arbitrary deep-link navigations, or other nested
 applications. Offline deep-link navigation is not supported. Local development with Vite remains at `/`;
@@ -157,5 +166,8 @@ under that same prefix. This branch does not enable or configure an identity
 provider and makes no authentication-policy changes.
 
 References: [Caddy handle_path](https://caddyserver.com/docs/caddyfile/directives/handle_path),
+[Caddy query placeholders](https://caddyserver.com/docs/caddyfile/concepts#placeholders),
 [Caddy streaming](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming),
-and [FastAPI behind a proxy](https://fastapi.tiangolo.com/advanced/behind-a-proxy/).
+[FastAPI behind a proxy](https://fastapi.tiangolo.com/advanced/behind-a-proxy/),
+[manifest identity](https://www.w3.org/TR/appmanifest/#id-member), and
+[RFC 9728 discovery challenges](https://www.rfc-editor.org/rfc/rfc9728.html#section-5).

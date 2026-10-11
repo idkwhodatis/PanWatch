@@ -7,6 +7,7 @@
  * 3. 完成 — 顶层摘要 + Markdown 推理 + 可展开 4 分析师报告 + 辩论
  */
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from 'react'
+import { publicUrl } from '@panwatch/api/base-path'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { buildAnalysisSections, type AnalysisSection } from '../analysis-sections'
@@ -703,7 +704,7 @@ function DoneView({
           size="sm"
           className="h-7 text-[11px] ml-auto"
           disabled={!analysisDate}
-          onClick={() => window.open(`/analysis/${encodeURIComponent(stockSymbol)}/${analysisDate}`, '_blank')}
+          onClick={() => window.open(publicUrl(`/analysis/${encodeURIComponent(stockSymbol)}/${analysisDate}`), '_blank')}
         >
           {tr('done.details')}
         </Button>
