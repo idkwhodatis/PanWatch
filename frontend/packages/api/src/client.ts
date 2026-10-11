@@ -1,7 +1,9 @@
 import { interfaceText, isEnglishInterface } from './locale'
-import { clearAuthSession, getAuthStatus } from './auth-session'
+import { clearAuthSession, getAuthRevision, getAuthStatus, invalidateAuthStatusRequests, setAuthStatus, validateAuthStatus, type AuthStatus } from './auth-session'
 
-const API_BASE = '/api'
+import { publicUrl } from './base-path'
+
+const API_BASE = publicUrl('/api')
 const DEFAULT_TIMEOUT_MS = 20000
 
 export interface ApiResponse<T> {
@@ -59,6 +61,8 @@ const API_ERROR_TEXT_EN: Record<string, string> = {
   auth_expired: 'Your session has expired. Sign in again.',
   password_login_disabled: 'Password sign-in is disabled. Continue with SSO.',
   auth_setup_disabled: 'Password setup is disabled for this installation.',
+  selfcheck_requires_post: 'Use POST to run system checks.',
+  entry_candidates_refresh_requires_post: 'Use POST to refresh entry candidates.',
   csrf_invalid: 'Your session changed or the request could not be verified. Refresh the page and try again.',
   oidc_not_configured: 'SSO is not configured correctly. Contact the installation owner.',
   avatar_data_invalid: 'The avatar data is invalid.',
@@ -165,7 +169,7 @@ export function authHeaders(method = 'GET'): Record<string, string> {
 
 function redirectToLogin() {
   // Auth failures on the login/status endpoints must never reload the login page.
-  if (window.location.pathname !== '/login') window.location.href = '/login'
+  if (window.location.pathname !== publicUrl('/login')) window.location.href = publicUrl('/login')
 }
 
 export class AuthExpiredError extends Error {}
@@ -177,32 +181,88 @@ export function handleUnauthorized(path: string, status: number): void {
   throw new AuthExpiredError(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
 }
 
+let statusRequest: Promise<AuthStatus> | null = null
+
+function readAuthStatus(fresh = false): Promise<AuthStatus> {
+  if (fresh) {
+    // A status request started before a rejected logout may still contain the
+    // old cookie's CSRF token. Do not reuse it or let it replace this fresh read.
+    invalidateAuthStatusRequests()
+    statusRequest = null
+  }
+  if (statusRequest) return statusRequest
+  const revision = getAuthRevision()
+  const request = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' }).then(validateAuthStatus).then(status => {
+    if (revision !== getAuthRevision()) {
+      const current = getAuthStatus()
+      if (fresh || !current) throw new Error('Authentication changed')
+      return current
+    }
+    setAuthStatus(status)
+    return status
+  }).finally(() => {
+    // An older request must not clear the newer in-flight request's dedup guard.
+    if (statusRequest === request) statusRequest = null
+  })
+  statusRequest = request
+  return request
+}
+
+export function loadAuthStatus(): Promise<AuthStatus> {
+  return readAuthStatus()
+}
+
+function sameAuthSession(left: AuthStatus | null, right: AuthStatus | null): boolean {
+  return left?.authenticated === right?.authenticated
+    && left?.auth_method === right?.auth_method && left?.csrf_token === right?.csrf_token
+}
+
 let logoutRequest: Promise<void> | null = null
 
 export function logout(): Promise<void> {
   if (logoutRequest) return logoutRequest
   logoutRequest = (async () => {
-    // Keep the verified session and CSRF token until server logout succeeds.
-    const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
-    let res: Response
-    try {
-      res = await fetch(`${API_BASE}/auth/logout`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: authHeaders('POST'),
-        signal: controller.signal,
-      })
-    } finally {
-      window.clearTimeout(timeout)
+    // Only a known CSRF rejection is safe to retry. Network errors, timeouts,
+    // generic 403s and arbitrary mutations never trigger an automatic replay.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const sentStatus = getAuthStatus()
+      const controller = new AbortController()
+      const timeout = window.setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+      let res: Response
+      try {
+        res = await fetch(`${API_BASE}/auth/logout`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: authHeaders('POST'),
+          signal: controller.signal,
+        })
+      } finally {
+        window.clearTimeout(timeout)
+      }
+      if (res.status !== 401) {
+        const body: ApiResponse<unknown> = await res.json().catch(() => ({ code: res.status, data: null, message: `HTTP ${res.status}` }))
+        if (!res.ok || body.code !== 0 || body.success === false) {
+          if (attempt === 0 && res.status === 403 && body.error_code === 'csrf_invalid') {
+            if (!sameAuthSession(sentStatus, getAuthStatus())) throw new Error('Authentication changed')
+            const current = await readAuthStatus(true)
+            if (!current.authenticated) {
+              // The fresh read confirms the cookie is already expired/revoked.
+              clearAuthSession()
+              redirectToLogin()
+              return
+            }
+            if (current.auth_method === 'oidc' && current.csrf_token !== sentStatus?.csrf_token) continue
+          }
+          throw new Error(localizedApiError(body, res.status))
+        }
+      }
+      // Never erase a newer session established while this logout was in flight.
+      if (!sameAuthSession(sentStatus, getAuthStatus())) throw new Error('Authentication changed')
+      // Success or 401 confirms there is no old server session left to revoke.
+      clearAuthSession()
+      redirectToLogin()
+      return
     }
-    if (res.status !== 401) {
-      const body: ApiResponse<unknown> = await res.json().catch(() => ({ code: res.status, data: null, message: `HTTP ${res.status}` }))
-      if (!res.ok || body.code !== 0 || body.success === false) throw new Error(localizedApiError(body, res.status))
-    }
-    // 401 confirms the session is already expired; there is nothing left to revoke.
-    clearAuthSession()
-    redirectToLogin()
   })().finally(() => { logoutRequest = null })
   return logoutRequest
 }

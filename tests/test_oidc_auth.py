@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.modules.administration import oidc
-from src.modules.administration.api import auth
+from src.modules.administration.api import auth, health
 from src.modules.administration.api import oidc as oidc_api
 from src.platform.persistence.database import Base, get_db
 from src.platform.persistence.models import OIDCLoginTransaction, OIDCSession
@@ -61,6 +61,7 @@ def app(db, monkeypatch):
     monkeypatch.setattr(oidc, "SessionLocal", sessionmaker(bind=db.bind))
     app.include_router(auth.router, prefix='/api/auth')
     app.include_router(oidc_api.router, prefix='/api/auth/oidc')
+    app.include_router(health.router, prefix='/api/health', dependencies=[Depends(auth.get_current_user)])
     app.dependency_overrides[get_db] = lambda: db
 
     @app.api_route('/api/private', methods=['GET', 'POST', 'PATCH', 'DELETE'])
@@ -279,6 +280,8 @@ def test_callback_prefix_cookie_path_ignore_forwarded_hosts(client, provider, mo
     params = parse_qs(urlsplit(result.headers['location']).query)
     assert params['redirect_uri'] == [ORIGIN + '/apps/panwatch/api/auth/oidc/callback']
     assert 'Path=/apps/panwatch/' in result.headers['set-cookie']
+    assert result.headers['set-cookie'].startswith(oidc.get_config().transaction_cookie + '=')
+    assert '/evil' not in oidc.get_config().cookie_path
 
 
 def test_session_persistence_expiry_and_owner_removal(client, app, provider, db, monkeypatch):
@@ -425,3 +428,125 @@ def test_cookie_authenticated_data_and_downloads_are_not_cacheable(client, app, 
         assert response.status_code == 200
         assert response.headers['cache-control'] == 'no-store'
         assert set(response.headers['vary'].split(', ')) >= {'Cookie', 'Authorization'}
+
+
+def nested_client(app, prefix):
+    # Emulate a trusted prefix-stripping proxy without importing the independent
+    # subpath-routing feature; the browser still enforces the external cookie path.
+    async def proxy(scope, receive, send):
+        if scope['type'] == 'http':
+            scope = dict(scope)
+            scope['path'] = scope['path'][len(prefix):]
+            scope['raw_path'] = scope['raw_path'][len(prefix):]
+        await app(scope, receive, send)
+    return TestClient(proxy, base_url=ORIGIN + prefix + '/', follow_redirects=False)
+
+
+@pytest.mark.parametrize('ancestor_path', ['/', '/apps/'])
+@pytest.mark.parametrize('cookie_kind', ['session', 'transaction'])
+def test_nested_login_ignores_ancestor_cookies(app, db, provider, monkeypatch, ancestor_path, cookie_kind):
+    prefix = '/apps/panwatch'
+    monkeypatch.setenv('PANWATCH_BASE_PATH', prefix)
+    monkeypatch.setenv('OIDC_PUBLIC_URL', ORIGIN + prefix)
+    oidc.get_config.cache_clear()
+    config = oidc.get_config()
+    with nested_client(app, prefix) as nested:
+        legacy_name = oidc.SESSION_COOKIE if cookie_kind == 'session' else oidc.TRANSACTION_COOKIE
+        nested.cookies.set(legacy_name, 'ancestor-cookie', domain='portfolio.example', path=ancestor_path)
+        started = nested.get('api/auth/oidc/login')
+        params = parse_qs(urlsplit(started.headers['location']).query)
+        provider['nonce'], provider['challenge'] = params['nonce'][0], params['code_challenge'][0]
+        assert started.headers['set-cookie'].startswith(config.transaction_cookie + '=')
+        callback = nested.get('api/auth/oidc/callback', params={'state': params['state'][0], 'code': 'mock-code'})
+        assert callback.headers['location'] == ORIGIN + prefix + '/'
+        assert config.transaction_cookie not in nested.cookies
+        status = data(nested.get('api/auth/status'))
+        assert status['authenticated']
+        old = nested.cookies[config.session_cookie]
+        headers = {'Origin': ORIGIN, 'X-CSRF-Token': status['csrf_token']}
+        assert nested.post('api/auth/logout', headers=headers).status_code == 200
+        assert config.session_cookie not in nested.cookies
+        assert nested.cookies[legacy_name] == 'ancestor-cookie'
+        assert not db.query(OIDCSession).filter_by(session_hash=oidc.digest(old)).count()
+
+
+def test_authenticated_root_to_subpath_migration(app, client, db, provider, monkeypatch):
+    complete(client, provider)
+    root_cookie = client.cookies[oidc.SESSION_COOKIE]
+    assert data(client.get('/api/auth/status'))['authenticated']
+    prefix = '/apps/panwatch'
+    monkeypatch.setenv('PANWATCH_BASE_PATH', prefix)
+    monkeypatch.setenv('OIDC_PUBLIC_URL', ORIGIN + prefix)
+    oidc.get_config.cache_clear()
+    config = oidc.get_config()
+    with nested_client(app, prefix) as nested:
+        nested.cookies.update(client.cookies)
+        for _ in range(2):
+            started = nested.get('api/auth/oidc/login')
+            params = parse_qs(urlsplit(started.headers['location']).query)
+            provider['nonce'], provider['challenge'] = params['nonce'][0], params['code_challenge'][0]
+            callback = nested.get('api/auth/oidc/callback', params={'state': params['state'][0], 'code': 'mock-code'})
+            assert callback.headers['location'] == ORIGIN + prefix + '/'
+            assert data(nested.get('api/auth/status'))['authenticated']
+        assert config.session_cookie != oidc.SESSION_COOKIE
+        assert nested.cookies[oidc.SESSION_COOKIE] == root_cookie
+        # Root cookie is ignored; relogin revokes only the prior nested session.
+        assert db.query(OIDCSession).filter_by(config_binding=config.binding).count() == 1
+        assert db.query(OIDCSession).filter_by(session_hash=oidc.digest(root_cookie)).count() == 1
+
+
+def test_nested_transaction_rotation_and_cancel_only_clear_own_cookie(app, db, provider, monkeypatch):
+    prefix = '/apps/panwatch'
+    monkeypatch.setenv('PANWATCH_BASE_PATH', prefix)
+    monkeypatch.setenv('OIDC_PUBLIC_URL', ORIGIN + prefix)
+    oidc.get_config.cache_clear()
+    config = oidc.get_config()
+    with nested_client(app, prefix) as nested:
+        nested.cookies.set(oidc.TRANSACTION_COOKIE, 'root-transaction', domain='portfolio.example', path='/')
+        first = nested.get('api/auth/oidc/login')
+        second = nested.get('api/auth/oidc/login')
+        assert first.headers['set-cookie'] != second.headers['set-cookie']
+        assert db.query(OIDCLoginTransaction).count() == 1
+        state = parse_qs(urlsplit(second.headers['location']).query)['state'][0]
+        result = nested.get('api/auth/oidc/callback', params={'state': state, 'error': 'access_denied'})
+        assert result.headers['location'].endswith('oidc_error=cancelled')
+        assert config.transaction_cookie not in nested.cookies
+        assert nested.cookies[oidc.TRANSACTION_COOKIE] == 'root-transaction'
+        assert db.query(OIDCLoginTransaction).count() == 0
+
+
+def test_selfcheck_get_cannot_run_probes_or_send_notifications(client, provider, monkeypatch):
+    from unittest.mock import AsyncMock
+    probe = AsyncMock(return_value={'items': [], 'notify_send': True})
+    monkeypatch.setattr(health, 'run_selfcheck', probe)
+    monkeypatch.setattr(health, 'list_selfcheck_items', lambda: [{'key': 'ai:1'}])
+    complete(client, provider)
+    for query in ('', '?notify_send=true', '?keys=ai:1', '?keys=notify:1&notify_send=true'):
+        result = client.get('/api/health/selfcheck' + query)
+        assert result.status_code == 405
+        assert result.headers['allow'] == 'POST'
+    assert client.head('/api/health/selfcheck?notify_send=true').status_code == 405
+    listed = client.get('/api/health/selfcheck?list=1&notify_send=true')
+    assert data(listed)['items'] == [{'key': 'ai:1'}]
+    probe.assert_not_awaited()
+    status = data(client.get('/api/auth/status'))
+    for headers in ({}, {'X-CSRF-Token': status['csrf_token'], 'Origin': 'https://evil.example'}):
+        assert client.post('/api/health/selfcheck?notify_send=true', headers=headers).status_code == 403
+    probe.assert_not_awaited()
+    headers = {'X-CSRF-Token': status['csrf_token'], 'Origin': ORIGIN}
+    assert client.post('/api/health/selfcheck?notify_send=true&keys=ai:1,notify:1', headers=headers).status_code == 200
+    probe.assert_awaited_once_with(notify_send=True, keys=['ai:1', 'notify:1'])
+
+
+def test_logout_after_another_tab_rotates_session_requires_refreshed_csrf(client, provider, db):
+    complete(client, provider)
+    stale = data(client.get('/api/auth/status'))['csrf_token']
+    complete(client, provider)
+    result = client.post('/api/auth/logout', headers={'Origin': ORIGIN, 'X-CSRF-Token': stale})
+    assert result.status_code == 403
+    assert result.json()['error_code'] == 'csrf_invalid'
+    assert db.query(OIDCSession).count() == 1
+    current = data(client.get('/api/auth/status'))['csrf_token']
+    assert current != stale
+    assert client.post('/api/auth/logout', headers={'Origin': ORIGIN, 'X-CSRF-Token': current}).status_code == 200
+    assert db.query(OIDCSession).count() == 0

@@ -21,6 +21,11 @@ export function getAuthRevision(): number {
   return revision
 }
 
+/** Invalidate older reads without changing the verified UI/session state. */
+export function invalidateAuthStatusRequests(): void {
+  revision += 1
+}
+
 export function subscribeAuthStatus(listener: () => void): () => void {
   listeners.add(listener)
   return () => { listeners.delete(listener) }

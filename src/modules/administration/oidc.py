@@ -114,6 +114,20 @@ class OIDCConfig:
     def cookie_path(self) -> str:
         return urlsplit(self.public_url).path.rstrip("/") + "/"
 
+    def cookie_name(self, name: str) -> str:
+        # Root deployments retain their original names. Nested deployments must
+        # not read an ancestor's cookie with the same name: browsers send both,
+        # and parsing can otherwise select the older ancestor value.
+        return name if self.cookie_path == "/" else f"{name}_{digest(self.cookie_path)[:16]}"
+
+    @property
+    def session_cookie(self) -> str:
+        return self.cookie_name(SESSION_COOKIE)
+
+    @property
+    def transaction_cookie(self) -> str:
+        return self.cookie_name(TRANSACTION_COOKIE)
+
     @property
     def origin(self) -> str:
         parsed = urlsplit(self.public_url)
@@ -236,7 +250,7 @@ def start_login(db: Session, config: OIDCConfig, previous_binding: str | None = 
         metadata = discover(config, client)
     cleanup(db)
     if previous_binding:
-        db.query(OIDCLoginTransaction).filter(OIDCLoginTransaction.browser_hash == digest(previous_binding)).delete(synchronize_session=False)
+        db.query(OIDCLoginTransaction).filter(OIDCLoginTransaction.browser_hash == digest(previous_binding), OIDCLoginTransaction.config_binding == config.binding).delete(synchronize_session=False)
     if db.query(OIDCLoginTransaction).count() >= 128:
         db.commit()
         raise api_error(429, "oidc_busy", "登录请求过多，请稍后重试")
@@ -314,7 +328,7 @@ def finish_login(db: Session, config: OIDCConfig, code: str, nonce: str, verifie
 
 
 def get_session(db: Session, request: Request, config: OIDCConfig) -> OIDCSession | None:
-    session_id = request.cookies.get(SESSION_COOKIE, "")
+    session_id = request.cookies.get(config.session_cookie, "")
     if not session_id or len(session_id) > 256:
         return None
     session = db.query(OIDCSession).filter(OIDCSession.session_hash == digest(session_id), OIDCSession.expires_at > int(time.time()), OIDCSession.config_binding == config.binding).first()

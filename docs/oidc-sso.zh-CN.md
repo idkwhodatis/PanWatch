@@ -72,3 +72,18 @@ MCP 仍使用现有带 scope 的 `pwmcp_` PAT，按自己的过期和撤销规�
 协议参考：[OIDC Core](https://openid.net/specs/openid-connect-core-1_0.html)、[OAuth Security BCP](https://www.rfc-editor.org/rfc/rfc9700.html)、[PyJWT API](https://pyjwt.readthedocs.io/en/stable/api.html)。
 
 公网部署应在可信的 Caddy/Cloudflare 边缘层限制 `/api/auth/oidc/login` 的请求频率。应用最多保留 128 个待完成交易，十分钟过期；匿名客户端可能耗尽此额度，使正常登录暂时返回 429，持续攻击可能延长中断。这个存储上限不能代替防滥用措施；本功能不会自动修改边缘层或部署设置。
+
+
+## GET 只读与接口迁移
+
+Cookie CSRF 防护要求 GET/HEAD/OPTIONS 不触发业务操作。旧版调用方请按以下方式迁移：
+
+- 执行自检改用 `POST /api/health/selfcheck`，原有 `notify_send` 和逗号分隔的 `keys` 查询参数不变。只有 `GET /api/health/selfcheck?list=1` 返回只读清单；其他 GET 返回 405 和 `Allow: POST`。即使不发通知，AI 探测仍可能消耗配额。前端全部和逐项自检均已改为 POST。
+- 刷新入场候选使用已有 `POST /api/recommendations/entry-candidates/refresh`。旧 `GET /api/recommendations/entry-candidates?refresh=true` 返回明确的迁移错误，不改变数据；普通列表 GET 保持可用。前端 SDK 的 `listEntryCandidates` 已移除 `refresh` 选项，需先调用 `refreshEntryCandidates` 再读列表。
+- `GET /api/assistant/exports/{export_id}` 只读取任务状态和结果，不启动排队中的 AI 导出。创建、重试 POST 和服务启动恢复负责执行任务；轮询客户端无需修改。
+
+以上 OIDC Cookie POST 都需要状态接口提供的 CSRF 请求头及规范 Origin。显式启用的密码 Bearer 客户端也使用 POST，无需 Cookie CSRF。
+
+会话和登录事务 Cookie 名称按可信配置中的规范部署路径隔离，根路径保留原名称。因此从 `/` 迁移到 `/apps/panwatch` 时，残留的祖先路径 Cookie 不会覆盖新 Cookie。已有子路径部署升级后需重新登录一次；旧的无命名空间 Cookie 会被忽略并自然过期。
+
+若另一标签页登录并轮换共享 Cookie，退出收到 `csrf_invalid` 后会重新读取不缓存的认证状态，最多用新的 CSRF 重试一次。网络失败、其他错误以及其他业务写操作不会自动重放；退出失败时保留已验证会话，便于手动重试。

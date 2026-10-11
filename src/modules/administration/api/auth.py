@@ -240,7 +240,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
             oidc.check_csrf(request, session, config)
             db.delete(session)
             db.commit()
-        response.delete_cookie(oidc.SESSION_COOKIE, path=config.cookie_path, secure=config.secure_cookie, httponly=True, samesite="lax")
+        response.delete_cookie(config.session_cookie, path=config.cookie_path, secure=config.secure_cookie, httponly=True, samesite="lax")
     return {"logged_out": True}
 
 

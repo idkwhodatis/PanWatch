@@ -201,3 +201,124 @@ describe('server-confirmed logout', () => {
     expect(isAuthenticated()).toBe(false)
   })
 })
+
+
+const csrfRejected = () => new Response(JSON.stringify({ code: 403, error_code: 'csrf_invalid', data: null }), { status: 403 })
+const rotatedStatus = { ...oidcStatus, csrf_token: 'rotated-in-another-tab' }
+
+describe('logout after another tab rotates its cookie', () => {
+  it('refreshes status and retries once with the new CSRF, deduplicating the whole operation', async () => {
+    setAuthStatus(oidcStatus)
+    const fetch = vi.fn().mockResolvedValueOnce(csrfRejected())
+      .mockResolvedValueOnce(response(rotatedStatus)).mockResolvedValueOnce(response({ logged_out: true }))
+    vi.stubGlobal('fetch', fetch)
+    const first = logout()
+    expect(logout()).toBe(first)
+    await first
+    expect(fetch.mock.calls.map(call => call[0])).toEqual(['/api/auth/logout', '/api/auth/status', '/api/auth/logout'])
+    expect(fetch.mock.calls[1][1]).toMatchObject({ cache: 'no-store', credentials: 'same-origin' })
+    expect(fetch.mock.calls[2][1].headers['X-CSRF-Token']).toBe('rotated-in-another-tab')
+    expect(isAuthenticated()).toBe(false)
+  })
+
+  it('stops after a second CSRF rejection and retains the refreshed session for a manual retry', async () => {
+    setAuthStatus(oidcStatus)
+    const fetch = vi.fn().mockResolvedValueOnce(csrfRejected())
+      .mockResolvedValueOnce(response(rotatedStatus)).mockResolvedValueOnce(csrfRejected())
+    vi.stubGlobal('fetch', fetch)
+    await expect(logout()).rejects.toThrow()
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(getAuthStatus()).toEqual(rotatedStatus)
+    fetch.mockResolvedValueOnce(response({ logged_out: true }))
+    await logout()
+    expect(fetch).toHaveBeenCalledTimes(4)
+  })
+
+  it('does not replay logout when the refreshed CSRF did not change', async () => {
+    setAuthStatus(oidcStatus)
+    const fetch = vi.fn().mockResolvedValueOnce(csrfRejected()).mockResolvedValueOnce(response(oidcStatus))
+    vi.stubGlobal('fetch', fetch)
+    await expect(logout()).rejects.toThrow()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(isAuthenticated()).toBe(true)
+  })
+
+  it('keeps the current session when status refresh fails', async () => {
+    setAuthStatus(oidcStatus)
+    const fetch = vi.fn().mockResolvedValueOnce(csrfRejected()).mockRejectedValueOnce(new Error('offline'))
+    vi.stubGlobal('fetch', fetch)
+    await expect(logout()).rejects.toThrow('offline')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(getAuthStatus()).toEqual(oidcStatus)
+  })
+
+  it('finishes without another POST if fresh status confirms expiry', async () => {
+    setAuthStatus(oidcStatus)
+    const fetch = vi.fn().mockResolvedValueOnce(csrfRejected()).mockResolvedValueOnce(response({
+      ...oidcStatus, authenticated: false, auth_method: null, csrf_token: null,
+    }))
+    vi.stubGlobal('fetch', fetch)
+    await logout()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(isAuthenticated()).toBe(false)
+  })
+
+  it('ignores an older pending status request and retains the fresh request dedup guard', async () => {
+    setAuthStatus(oidcStatus)
+    let oldStatus!: (value: Response) => void
+    let freshStatus!: (value: Response) => void
+    const fetch = vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { oldStatus = resolve }))
+      .mockResolvedValueOnce(csrfRejected())
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { freshStatus = resolve }))
+      .mockResolvedValueOnce(response({ logged_out: true }))
+    vi.stubGlobal('fetch', fetch)
+    const old = authApi.status()
+    const pending = logout()
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
+    oldStatus(response(oidcStatus))
+    await old
+    const concurrent = authApi.status()
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(logout()).toBe(pending)
+    freshStatus(response(rotatedStatus))
+    await Promise.all([pending, concurrent])
+    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(isAuthenticated()).toBe(false)
+  })
+
+  it('does not retry or restore state when authentication changes during refresh', async () => {
+    setAuthStatus(oidcStatus)
+    let freshStatus!: (value: Response) => void
+    const fetch = vi.fn().mockResolvedValueOnce(csrfRejected())
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { freshStatus = resolve }))
+    vi.stubGlobal('fetch', fetch)
+    const pending = logout()
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    clearAuthSession()
+    freshStatus(response(rotatedStatus))
+    await expect(pending).rejects.toThrow('Authentication changed')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(isAuthenticated()).toBe(false)
+  })
+
+  it('does not erase a newer session while a logout response is pending', async () => {
+    setAuthStatus(oidcStatus)
+    let finish!: (value: Response) => void
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { finish = resolve })))
+    const pending = logout()
+    setAuthStatus(rotatedStatus)
+    finish(response({ logged_out: true }))
+    await expect(pending).rejects.toThrow('Authentication changed')
+    expect(getAuthStatus()).toEqual(rotatedStatus)
+  })
+
+  it('never automatically replays other mutation requests on csrf_invalid', async () => {
+    setAuthStatus(oidcStatus)
+    const fetch = vi.fn().mockResolvedValue(csrfRejected())
+    vi.stubGlobal('fetch', fetch)
+    await expect(fetchAPI('/settings/example', { method: 'POST', body: '{}' })).rejects.toThrow()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(getAuthStatus()).toEqual(oidcStatus)
+  })
+})

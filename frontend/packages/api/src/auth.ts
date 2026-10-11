@@ -1,24 +1,6 @@
-import { fetchAPI } from './client'
-import { getAuthRevision, getAuthStatus, setAuthStatus, validateAuthStatus, type AuthStatus } from './auth-session'
+import { fetchAPI, loadAuthStatus } from './client'
+import { getAuthStatus, setAuthStatus } from './auth-session'
 export type { AuthStatus } from './auth-session'
-
-let statusRequest: Promise<AuthStatus> | null = null
-
-function loadStatus(): Promise<AuthStatus> {
-  if (statusRequest) return statusRequest
-  const revision = getAuthRevision()
-  statusRequest = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' }).then(validateAuthStatus).then(status => {
-    // Ignore a response that predates a completed logout or another auth change.
-    if (revision !== getAuthRevision()) {
-      const current = getAuthStatus()
-      if (!current) throw new Error('Authentication changed')
-      return current
-    }
-    setAuthStatus(status)
-    return status
-  }).finally(() => { statusRequest = null })
-  return statusRequest
-}
 
 export function rememberPasswordLogin(data: AuthTokenPayload): void {
   localStorage.setItem('token', data.token)
@@ -38,7 +20,7 @@ export interface LoginPayload {
 }
 
 export const authApi = {
-  status: loadStatus,
+  status: loadAuthStatus,
   startOidcLogin: (url: string) => window.location.assign(url),
   login: (payload: LoginPayload) =>
     fetchAPI<AuthTokenPayload>('/auth/login', {

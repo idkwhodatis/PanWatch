@@ -56,7 +56,7 @@ The API and app use the same origin. OIDC browser sessions use a Secure, HttpOnl
 
 For LAN and tunnel access, use the same canonical HTTPS hostname when signing in. DNS can resolve that hostname to the local Caddy instance on the LAN. An HTTP LAN IP address is not an alternative authenticated origin; normal Secure cookies intentionally do not work there.
 
-For an app served at a prefix, the reverse-proxy-subpath feature must also be present and configured. For example, set `PANWATCH_BASE_PATH=/apps/panwatch` and `OIDC_PUBLIC_URL=https://portfolio.example.com/apps/panwatch`, then register `https://portfolio.example.com/apps/panwatch/api/auth/oidc/callback`. The paths must match. Cookies are scoped to `/apps/panwatch/`. This OIDC branch alone does not add frontend or proxy subpath routing.
+For an app served at a prefix, the reverse-proxy-subpath feature must also be present and configured. For example, set `PANWATCH_BASE_PATH=/apps/panwatch` and `OIDC_PUBLIC_URL=https://portfolio.example.com/apps/panwatch`, then register `https://portfolio.example.com/apps/panwatch/api/auth/oidc/callback`. The paths must match. Cookies are scoped to `/apps/panwatch/`, and both session and login-transaction cookie names are namespaced by this canonical path. Root deployments keep their original cookie names. Moving from `/` to a nested path therefore does not let an older ancestor cookie shadow the new session. Upgrading an existing nested deployment requires one fresh sign-in; its previous unnamespaced cookies are ignored and expire normally. This OIDC branch alone does not add frontend or proxy subpath routing.
 
 Do not cache `/api/auth/*`, including redirects and failures, at the proxy. Responses already send `Cache-Control: no-store`. Redact callback query strings in Caddy, tunnel and application access logs: standard authorization callbacks contain short-lived codes and state. Do not enable HTTP body/debug logging for the provider exchange. The application does not log provider responses, claims, codes, secrets or tokens.
 
@@ -66,9 +66,19 @@ The server exchanges and validates the ID token and discards provider access/ref
 
 The local session is an opaque random ID. Only its hash, CSRF token, owner identity, configuration binding and absolute expiry are persisted in SQLite. Sessions survive a restart, expire without silent refresh, and are rejected if the configured issuer, client ID, public URL or subject authorization no longer matches. Expired rows are cleaned up during login. A new login revokes the browser's previous session.
 
-Logout is a CSRF-protected POST that revokes the local session. It does not log you out of the identity provider or other applications. The provider may sign you straight back in next time; use its own sign-out controls when leaving a shared computer. Provider-side disablement or logout does not instantly revoke an existing PanWatch session; allowlist removal followed by an application restart rejects that identity immediately. Provider back-channel logout and token refresh are not implemented.
+Logout is a CSRF-protected POST that revokes the local session. If another tab signs in and rotates the shared cookie, a `csrf_invalid` logout response triggers a fresh, uncached status check and at most one retry with the changed CSRF token. Network failures and other mutations are never automatically replayed; failed logout retains the verified session so the owner can retry. It does not log you out of the identity provider or other applications. The provider may sign you straight back in next time; use its own sign-out controls when leaving a shared computer. Provider-side disablement or logout does not instantly revoke an existing PanWatch session; allowlist removal followed by an application restart rejects that identity immediately. Provider back-channel logout and token refresh are not implemented.
 
 MCP continues to use its existing scoped `pwmcp_` personal access tokens; OIDC is not an OAuth authorization server for MCP. Existing MCP PATs remain valid according to their own scope, expiry and revocation rules. General REST clients can either implement the cookie/status/CSRF flow on the canonical origin or use the existing password bearer-token flow only when explicit password fallback is enabled. Provider ID/access tokens are not PanWatch API bearer tokens.
+
+## Read-only GET and API migration
+
+Cookie CSRF protection depends on GET/HEAD/OPTIONS remaining observational. Integrations using older action-by-GET endpoints must migrate:
+
+- Execute selfchecks with `POST /api/health/selfcheck`; existing `notify_send` and comma-separated `keys` query parameters are unchanged. Only `GET /api/health/selfcheck?list=1` remains read-only. Other GET requests return 405 and `Allow: POST`, including when notification sending is false, because AI probes may spend quota. The frontend already sends POST for both complete and per-item checks.
+- Refresh entry candidates with the existing `POST /api/recommendations/entry-candidates/refresh`. `GET /api/recommendations/entry-candidates?refresh=true` returns an explicit migration error without changing candidates. Normal candidate-list GETs remain supported; the frontend SDK no longer exposes a `refresh` option on `listEntryCandidates`, so use `refreshEntryCandidates` followed by a list read.
+- `GET /api/assistant/exports/{export_id}` only reads progress/results; it cannot start queued AI generation. Existing creation/retry POSTs and startup recovery own job execution. Polling clients do not need to change.
+
+OIDC cookie POSTs require the verified CSRF header and canonical Origin described above. Explicitly enabled password-bearer clients use the same POST endpoints without cookie CSRF.
 
 ## Validation and current boundaries
 

@@ -134,6 +134,10 @@ docker compose up -d
 
 </details>
 
+## 可选单点登录
+
+单所有者应用支持可选 OpenID Connect SSO，默认关闭。启用时必须明确配置 issuer/sub 允许名单与唯一 HTTPS 地址；请先阅读 [OIDC 配置与安全说明](docs/oidc-sso.zh-CN.md)。
+
 ## 详细说明
 
 <details>
@@ -347,7 +351,3 @@ PanWatch 完全免费开源。如果它节省了你的时间或改善了工作�
 ### 全球市场概览
 
 首页支持九个可配置市场分组及29项指数、期货、加密货币和国债收益率观测，可调整显示和排序。请参阅[数据覆盖、时效、许可和分叉同步说明](docs/features/global-overview.md)。公共来源仅提供延迟／每日参考数据；公开或商业再分发前须核实许可。
-
-## 可选单点登录
-
-单所有者应用支持可选 OpenID Connect SSO，默认关闭。启用时必须明确配置 issuer/sub 允许名单与唯一 HTTPS 地址；请先阅读 [OIDC 配置与安全说明](docs/oidc-sso.zh-CN.md)。

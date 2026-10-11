@@ -55,5 +55,5 @@ def test_production_spa_rejects_symlink_escape(static_app):
     (public / 'index.html').unlink()
     (public / 'index.html').symlink_to(public.parent / 'private-canary.txt')
     response = client.get('/portfolio')
-    assert response.status_code in (200, 404)  # A preloaded safe SPA may remain cached.
+    assert response.status_code == 404
     assert 'PRIVATE_FILE_CANARY' not in response.text

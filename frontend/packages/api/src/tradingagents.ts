@@ -1,3 +1,4 @@
+import { publicUrl } from './base-path'
 /**
  * TradingAgents 深度分析 API。
  * 复用现有 /api/stocks/:id/agents/:name/trigger,只是 agent_name = "tradingagents"。
@@ -197,7 +198,7 @@ export const tradingAgentsApi = {
   /** 把某次深度分析报告导出为 PDF 文件并触发下载(后台直出,不走打印对话框)。 */
   async downloadAnalysisPdf(symbol: string, date: string): Promise<void> {
     const qs = new URLSearchParams({ stock_symbol: symbol, analysis_date: date })
-    const resp = await fetch(`/api/agents/tradingagents/analysis/pdf?${qs.toString()}`, {
+    const resp = await fetch(publicUrl(`/api/agents/tradingagents/analysis/pdf?${qs.toString()}`), {
       credentials: 'same-origin',
       headers: authHeaders(),
     })
