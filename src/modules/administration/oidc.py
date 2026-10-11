@@ -10,6 +10,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ from dotenv import dotenv_values
 from fastapi import Request
 from sqlalchemy.orm import Session
 
-from src.platform.persistence.models import OIDCLoginTransaction, OIDCSession
+from src.platform.persistence.models import OIDCBrowserGeneration, OIDCLoginTransaction, OIDCSession
 from src.platform.persistence.database import SessionLocal
 from src.platform.observability.log_context import redact_http_logs
 from src.web.errors import api_error
@@ -30,6 +31,8 @@ from src.web.errors import api_error
 SESSION_COOKIE = "panwatch_oidc_session"
 TRANSACTION_COOKIE = "panwatch_oidc_login"
 TRANSACTION_SECONDS = 600
+COOKIE_QUERY_BATCH = 32
+MAX_COOKIE_DELETIONS = 16
 # Explicit asymmetric allowlist; never derive allowed algorithms from token data.
 SIGNING_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"]
 
@@ -239,43 +242,168 @@ def discover(config: OIDCConfig, client: httpx.Client) -> dict:
     return metadata
 
 
+def generation_cookie(base: str, browser_hash: str) -> str:
+    return f"{base}_{browser_hash}"
+
+
+def _cookie_generations(request: Request, config: OIDCConfig) -> set[str]:
+    """Only this deployment's exact names; sibling/ancestor cookies do not match."""
+    hashes = set()
+    for name, value in request.cookies.items():
+        for base in (config.transaction_cookie, config.session_cookie):
+            prefix = base + "_"
+            suffix = name[len(prefix):] if name.startswith(prefix) else ""
+            if re.fullmatch(r"[0-9a-f]{64}", suffix) and 0 < len(value) <= 256:
+                hashes.add(suffix)
+    return hashes
+
+
+def _generation_rows(db: Session, config: OIDCConfig, hashes: set[str]) -> list[OIDCBrowserGeneration]:
+    # Delayed first-touch responses may temporarily leave many names. Batch the
+    # lookup rather than making that state prevent status, logout, or recovery.
+    values, rows = sorted(hashes), []
+    for offset in range(0, len(values), COOKIE_QUERY_BATCH):
+        rows.extend(db.query(OIDCBrowserGeneration).filter(
+            OIDCBrowserGeneration.browser_hash.in_(values[offset:offset + COOKIE_QUERY_BATCH]),
+            OIDCBrowserGeneration.config_binding == config.binding,
+            OIDCBrowserGeneration.expires_at > int(time.time()),
+        ).populate_existing().all())
+    return rows
+
+
+def browser_generations(db: Session, request: Request, config: OIDCConfig) -> list[OIDCBrowserGeneration]:
+    hashes = _cookie_generations(request, config)
+    if not hashes:
+        return []
+    rows = _generation_rows(db, config, hashes)
+    return [row for row in rows if (
+        digest(request.cookies.get(generation_cookie(config.transaction_cookie, row.browser_hash), "")) == row.browser_hash
+        or (row.session_hash and digest(request.cookies.get(generation_cookie(config.session_cookie, row.browser_hash), "")) == row.session_hash)
+    )]
+
+
+def _has_binding_cookie(request: Request, config: OIDCConfig, row: OIDCBrowserGeneration) -> bool:
+    value = request.cookies.get(generation_cookie(config.transaction_cookie, row.browser_hash), "")
+    return bool(value and len(value) <= 256 and digest(value) == row.browser_hash)
+
+
+def _has_session_cookie(request: Request, config: OIDCConfig, row: OIDCBrowserGeneration) -> bool:
+    value = request.cookies.get(generation_cookie(config.session_cookie, row.browser_hash), "")
+    return bool(value and row.session_hash and digest(value) == row.session_hash)
+
+
+def _revoke(db: Session, ids: list[int]) -> None:
+    if not ids:
+        return
+    rows = db.query(OIDCBrowserGeneration).filter(OIDCBrowserGeneration.id.in_(ids)).all()
+    db.query(OIDCLoginTransaction).filter(OIDCLoginTransaction.browser_hash.in_([row.browser_hash for row in rows])).delete(synchronize_session=False)
+    db.query(OIDCSession).filter(OIDCSession.session_hash.in_([row.session_hash for row in rows if row.session_hash])).delete(synchronize_session=False)
+    db.query(OIDCBrowserGeneration).filter(OIDCBrowserGeneration.id.in_(ids)).update({"revoked": True}, synchronize_session=False)
+    # Terminal attempts with no issued credential need only cover outstanding
+    # transaction ordering. Issued sessions retain their full logout horizon.
+    deadline = int(time.time()) + TRANSACTION_SECONDS
+    db.query(OIDCBrowserGeneration).filter(OIDCBrowserGeneration.id.in_(ids),
+        OIDCBrowserGeneration.session_hash.is_(None), OIDCBrowserGeneration.expires_at > deadline,
+    ).update({"expires_at": deadline}, synchronize_session=False)
+
+
 def cleanup(db: Session) -> None:
     now = int(time.time())
     db.query(OIDCLoginTransaction).filter(OIDCLoginTransaction.expires_at <= now).delete(synchronize_session=False)
     db.query(OIDCSession).filter(OIDCSession.expires_at <= now).delete(synchronize_session=False)
+    db.query(OIDCBrowserGeneration).filter(OIDCBrowserGeneration.expires_at <= now).delete(synchronize_session=False)
 
 
-def start_login(db: Session, config: OIDCConfig, previous_binding: str | None = None) -> tuple[str, str]:
-    with redact_http_logs(), http_client() as client:
-        metadata = discover(config, client)
+def obsolete_cookies(db: Session, request: Request, config: OIDCConfig) -> list[str]:
+    """Names are never reused, so deleting an observed obsolete name is safe.
+
+    No callback/logout deletes a shared fixed-name cookie. Unknown fixed-name
+    cookies from the old implementation are ignored and expire naturally.
+    """
+    hashes = _cookie_generations(request, config)
+    live = {row.browser_hash for row in _generation_rows(db, config, hashes) if not row.revoked}
+    return [generation_cookie(base, value) for value in sorted(hashes - live)
+            for base in (config.transaction_cookie, config.session_cookie)
+            if generation_cookie(base, value) in request.cookies][:MAX_COOKIE_DELETIONS]
+
+
+def start_login(db: Session, config: OIDCConfig, request: Request) -> tuple[str, str, str]:
+    # The first write serializes every following eligibility read on SQLite.
     cleanup(db)
-    if previous_binding:
-        db.query(OIDCLoginTransaction).filter(OIDCLoginTransaction.browser_hash == digest(previous_binding), OIDCLoginTransaction.config_binding == config.binding).delete(synchronize_session=False)
-    if db.query(OIDCLoginTransaction).count() >= 128:
+    previous = browser_generations(db, request, config)
+    current = get_session(db, request, config)
+    preserve = current.session_hash if current else None
+    superseded = [row.id for row in previous if not preserve or row.session_hash != preserve]
+    pending = db.query(OIDCLoginTransaction).filter(~OIDCLoginTransaction.browser_hash.in_([row.browser_hash for row in previous])).count()
+    if pending >= 128:
         db.commit()
         raise api_error(429, "oidc_busy", "登录请求过多，请稍后重试")
+    _revoke(db, superseded)
     state, browser_binding, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(4))
-    db.add(OIDCLoginTransaction(state_hash=digest(state), browser_hash=digest(browser_binding), nonce=nonce, verifier=verifier, config_binding=config.binding, expires_at=int(time.time()) + TRANSACTION_SECONDS))
+    browser_hash = digest(browser_binding)
+    # Binding must outlive even a callback that finishes at the transaction TTL.
+    generation = OIDCBrowserGeneration(browser_hash=browser_hash, config_binding=config.binding,
+        expires_at=int(time.time()) + TRANSACTION_SECONDS + config.session_seconds)
+    db.add(generation)
+    db.add(OIDCLoginTransaction(state_hash=digest(state), browser_hash=browser_hash, nonce=nonce, verifier=verifier, config_binding=config.binding, expires_at=int(time.time()) + TRANSACTION_SECONDS))
+    db.flush()
+    generation_id = generation.id
     db.commit()
+    # Reserve issuance order before provider latency can reorder concurrent
+    # first-touch starts. Provider I/O never holds the SQLite write lock.
+    try:
+        with redact_http_logs(), http_client() as client:
+            metadata = discover(config, client)
+    except (OIDCError, httpx.HTTPError, ValueError, TypeError, KeyError):
+        _revoke(db, [generation_id])
+        db.commit()
+        raise
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     params = {"response_type": "code", "client_id": config.client_id, "redirect_uri": config.callback_url, "scope": "openid", "state": state, "nonce": nonce, "code_challenge": challenge, "code_challenge_method": "S256", "response_mode": "query"}
-    return metadata["authorization_endpoint"] + "?" + urlencode(params), browser_binding
+    return metadata["authorization_endpoint"] + "?" + urlencode(params), browser_binding, browser_hash
 
 
-def consume_transaction(db: Session, config: OIDCConfig, state: str, browser_binding: str) -> tuple[str, str]:
-    if not state or not browser_binding or len(state) > 256 or len(browser_binding) > 256:
+@dataclass(frozen=True)
+class LoginTransaction:
+    nonce: str
+    verifier: str
+    generation_id: int
+    browser_hash: str
+    observed_ids: tuple[int, ...]
+
+
+def consume_transaction(db: Session, config: OIDCConfig, state: str, request: Request) -> LoginTransaction:
+    if not state or len(state) > 256:
         raise OIDCError("Missing login transaction")
-    filters = (OIDCLoginTransaction.state_hash == digest(state), OIDCLoginTransaction.browser_hash == digest(browser_binding), OIDCLoginTransaction.config_binding == config.binding, OIDCLoginTransaction.expires_at > int(time.time()))
+    filters = (OIDCLoginTransaction.state_hash == digest(state), OIDCLoginTransaction.config_binding == config.binding, OIDCLoginTransaction.expires_at > int(time.time()))
     transaction = db.query(OIDCLoginTransaction).filter(*filters).first()
     if transaction is None:
         raise OIDCError("Expired or invalid login transaction")
-    nonce, verifier = transaction.nonce, transaction.verifier
-    # The atomic delete must win before the authorization code is exchanged.
+    binding = request.cookies.get(generation_cookie(config.transaction_cookie, transaction.browser_hash), "")
+    if not binding or len(binding) > 256 or digest(binding) != transaction.browser_hash:
+        raise OIDCError("Missing login binding")
+    nonce, verifier, browser_hash = transaction.nonce, transaction.verifier, transaction.browser_hash
+    # Authenticate state + binding before any mutation. Atomic delete claims this
+    # callback and obtains SQLite's write lock before checking generation state.
     consumed = db.query(OIDCLoginTransaction).filter(*filters).delete(synchronize_session=False)
+    generations = browser_generations(db, request, config)
+    generation = next((row for row in generations if row.browser_hash == browser_hash), None)
+    if consumed != 1 or generation is None or generation.revoked or generation.id != max(row.id for row in generations):
+        if consumed == 1 and generation is not None:
+            _revoke(db, [generation.id])
+        db.commit()
+        raise OIDCError("Superseded or already used login transaction")
+    current = get_session(db, request, config)
+    preserve = current.session_hash if current else None
+    _revoke(db, [row.id for row in generations if row.id < generation.id and (not preserve or row.session_hash != preserve)])
+    result = LoginTransaction(nonce, verifier, generation.id, browser_hash, tuple(row.id for row in generations))
     db.commit()
-    if consumed != 1:
-        raise OIDCError("Login transaction already used")
-    return nonce, verifier
+    return result
+
+
+def cancel_transaction(db: Session, transaction: LoginTransaction) -> None:
+    _revoke(db, [transaction.generation_id])
+    db.commit()
 
 
 def validate_id_token(config: OIDCConfig, metadata: dict, token: str, nonce: str, client: httpx.Client) -> dict:
@@ -302,12 +430,12 @@ def validate_id_token(config: OIDCConfig, metadata: dict, token: str, nonce: str
     return claims
 
 
-def finish_login(db: Session, config: OIDCConfig, code: str, nonce: str, verifier: str) -> tuple[str, str]:
+def finish_login(db: Session, config: OIDCConfig, code: str, transaction: LoginTransaction) -> tuple[str, str]:
     if not code or len(code) > 8192:
         raise OIDCError("Missing authorization code")
     with redact_http_logs(), http_client() as client:
         metadata = discover(config, client)
-        data = {"grant_type": "authorization_code", "code": code, "redirect_uri": config.callback_url, "code_verifier": verifier}
+        data = {"grant_type": "authorization_code", "code": code, "redirect_uri": config.callback_url, "code_verifier": transaction.verifier}
         auth = None
         if config.token_auth_method == "client_secret_basic":
             auth = httpx.BasicAuth(quote(config.client_id, safe=""), quote(config.client_secret, safe=""))
@@ -319,25 +447,74 @@ def finish_login(db: Session, config: OIDCConfig, code: str, nonce: str, verifie
         token = token_response.get("id_token")
         if not isinstance(token, str) or len(token) > 65536:
             raise OIDCError("Missing ID token")
-        claims = validate_id_token(config, metadata, token, nonce, client)
+        claims = validate_id_token(config, metadata, token, transaction.nonce, client)
     session_id, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    cleanup(db)
-    db.add(OIDCSession(session_hash=digest(session_id), csrf_token=csrf, issuer=config.issuer, subject=claims["sub"], config_binding=config.binding, expires_at=int(time.time()) + config.session_seconds))
+    now = int(time.time())
+    # Claim under the write lock, after provider I/O. Logout/start can revoke a
+    # consumed callback while it waits; both claim and insertion are one commit.
+    claimed = db.query(OIDCBrowserGeneration).filter(
+        OIDCBrowserGeneration.id == transaction.generation_id,
+        OIDCBrowserGeneration.config_binding == config.binding,
+        OIDCBrowserGeneration.revoked.is_(False),
+        OIDCBrowserGeneration.session_hash.is_(None),
+        OIDCBrowserGeneration.expires_at > now,
+    ).update({"session_hash": digest(session_id)}, synchronize_session=False)
+    if claimed != 1:
+        db.rollback()
+        raise OIDCError("Login generation was revoked")
+    generation = db.query(OIDCBrowserGeneration).filter_by(id=transaction.generation_id).populate_existing().one()
+    _revoke(db, [identity for identity in transaction.observed_ids if identity < generation.id])
+    expires_at = min(now + config.session_seconds, generation.expires_at)
+    generation.csrf_token, generation.subject, generation.session_expires_at = csrf, claims["sub"], expires_at
+    db.add(OIDCSession(session_hash=digest(session_id), csrf_token=csrf, issuer=config.issuer, subject=claims["sub"], config_binding=config.binding, expires_at=expires_at))
     db.commit()
     return session_id, csrf
 
 
 def get_session(db: Session, request: Request, config: OIDCConfig) -> OIDCSession | None:
-    session_id = request.cookies.get(config.session_cookie, "")
-    if not session_id or len(session_id) > 256:
-        return None
-    session = db.query(OIDCSession).filter(OIDCSession.session_hash == digest(session_id), OIDCSession.expires_at > int(time.time()), OIDCSession.config_binding == config.binding).first()
-    if session is None or session.issuer != config.issuer or session.subject not in config.subjects:
-        return None
-    return session
+    rows = browser_generations(db, request, config)
+    for row in sorted(rows, key=lambda row: row.id, reverse=True):
+        # A callback never rewrites the binding. A held credential response
+        # cannot authenticate if that browser evidence was cleared or evicted.
+        if row.revoked or not _has_binding_cookie(request, config, row) or not _has_session_cookie(request, config, row):
+            continue
+        session = db.query(OIDCSession).filter(OIDCSession.session_hash == row.session_hash,
+            OIDCSession.expires_at > int(time.time()), OIDCSession.config_binding == config.binding).first()
+        if session is not None and session.issuer == config.issuer and session.subject in config.subjects:
+            return session
+    return None
 
 
-def check_csrf(request: Request, session: OIDCSession, config: OIDCConfig) -> None:
+def logout_browser(db: Session, request: Request, config: OIDCConfig, *, password_authenticated: bool = False) -> None:
+    # Serialize before loading the bounded logout proof and its observed scope.
+    db.query(OIDCBrowserGeneration).filter(OIDCBrowserGeneration.id == -1).update({"revoked": True}, synchronize_session=False)
+    rows = browser_generations(db, request, config)
+    proofs = [row for row in rows if _has_session_cookie(request, config, row)
+              and row.csrf_token and row.subject in config.subjects
+              and row.session_expires_at and row.session_expires_at > int(time.time())]
+    active_hashes = {value for (value,) in db.query(OIDCSession.session_hash).filter(
+        OIDCSession.session_hash.in_([row.session_hash for row in rows if row.session_hash]),
+        OIDCSession.expires_at > int(time.time()), OIDCSession.config_binding == config.binding,
+    ).all()}
+    cancellable = any(not row.revoked and (row.session_hash is None or row.session_hash in active_hashes) for row in rows)
+    if not cancellable or (not proofs and not password_authenticated):
+        db.rollback()
+        return
+    # A superseded session is proof only for logout, never authentication. This
+    # closes commit-before-cookie-delivery without granting stale snapshots the
+    # ability to revoke a later login whose binding they never carried.
+    if password_authenticated:
+        # The existing fallback Bearer is nonambient proof for cross-mode logout;
+        # never extend it to SSO-only or requests without the canonical Origin.
+        if request.headers.get("origin") != config.origin:
+            raise api_error(403, "csrf_invalid", "请求验证失败，请刷新后重试")
+    else:
+        check_csrf(request, max(proofs, key=lambda row: row.id), config)
+    _revoke(db, [row.id for row in rows])
+    db.commit()
+
+
+def check_csrf(request: Request, session: OIDCSession | OIDCBrowserGeneration, config: OIDCConfig) -> None:
     if request.method in {"GET", "HEAD", "OPTIONS"}:
         return
     value = request.headers.get("X-CSRF-Token", "")
@@ -351,5 +528,8 @@ def session_is_active(identity: tuple[str, str]) -> bool:
     if config is None or identity[1] != config.binding:
         return False
     with SessionLocal() as db:
-        session = db.query(OIDCSession).filter(OIDCSession.session_hash == identity[0], OIDCSession.config_binding == config.binding, OIDCSession.expires_at > int(time.time())).first()
+        session = db.query(OIDCSession).join(OIDCBrowserGeneration, OIDCBrowserGeneration.session_hash == OIDCSession.session_hash).filter(
+            OIDCSession.session_hash == identity[0], OIDCSession.config_binding == config.binding,
+            OIDCSession.expires_at > int(time.time()), OIDCBrowserGeneration.revoked.is_(False),
+            OIDCBrowserGeneration.config_binding == config.binding, OIDCBrowserGeneration.expires_at > int(time.time())).first()
         return bool(session is not None and session.issuer == config.issuer and session.subject in config.subjects)

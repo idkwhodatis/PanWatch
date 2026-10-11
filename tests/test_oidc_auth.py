@@ -115,6 +115,19 @@ def provider(monkeypatch):
     return state
 
 
+def cookie_name(client, base):
+    """Most recent exact-namespace generation cookie in this browser fixture."""
+    import re
+    names = [cookie.name for cookie in client.cookies.jar
+             if re.fullmatch(re.escape(base) + r"_[0-9a-f]{64}", cookie.name)]
+    assert names, (base, list(client.cookies.keys()))
+    return names[-1]
+
+
+def cookie_value(client, base):
+    return client.cookies[cookie_name(client, base)]
+
+
 def start(client, provider):
     response = client.get('/api/auth/oidc/login')
     assert response.status_code == 303
@@ -145,7 +158,7 @@ def test_code_flow_cookie_session_csrf_and_logout(client, provider, db):
     assert response.status_code == 303 and response.headers['location'] == ORIGIN + '/'
     assert response.headers['cache-control'] == 'no-store'
     assert 'must-never-be-persisted' not in response.text + str(response.headers)
-    assert db.query(OIDCSession).one().session_hash != client.cookies[oidc.SESSION_COOKIE]
+    assert db.query(OIDCSession).one().session_hash != cookie_value(client, oidc.SESSION_COOKIE)
     status = data(client.get('/api/auth/status'))
     assert status['authenticated'] and status['auth_method'] == 'oidc' and not status['password_enabled']
     assert client.get('/api/private').status_code == 200
@@ -158,10 +171,10 @@ def test_code_flow_cookie_session_csrf_and_logout(client, provider, db):
     assert client.post('/api/stream').status_code == 403
     assert client.get('/api/auth/logout').status_code == 405
     assert client.post('/api/auth/logout').status_code == 403
-    old_cookie = client.cookies[oidc.SESSION_COOKIE]
+    old_cookie = cookie_value(client, oidc.SESSION_COOKIE)
     assert client.post('/api/auth/logout', headers=headers).status_code == 200
     assert db.query(OIDCSession).count() == 0
-    client.cookies.set(oidc.SESSION_COOKIE, old_cookie)
+    client.cookies.set(cookie_name(client, oidc.SESSION_COOKIE), old_cookie)
     assert client.get('/api/private').status_code == 401
     assert client.post('/api/auth/logout').status_code == 200
 
@@ -280,14 +293,14 @@ def test_callback_prefix_cookie_path_ignore_forwarded_hosts(client, provider, mo
     params = parse_qs(urlsplit(result.headers['location']).query)
     assert params['redirect_uri'] == [ORIGIN + '/apps/panwatch/api/auth/oidc/callback']
     assert 'Path=/apps/panwatch/' in result.headers['set-cookie']
-    assert result.headers['set-cookie'].startswith(oidc.get_config().transaction_cookie + '=')
+    assert result.headers['set-cookie'].startswith(oidc.get_config().transaction_cookie + '_')
     assert '/evil' not in oidc.get_config().cookie_path
 
 
 def test_session_persistence_expiry_and_owner_removal(client, app, provider, db, monkeypatch):
     assert complete(client, provider).headers['location'] == ORIGIN + '/'
     with TestClient(app, base_url=ORIGIN) as restarted:
-        restarted.cookies.set(oidc.SESSION_COOKIE, client.cookies[oidc.SESSION_COOKIE])
+        restarted.cookies.update(client.cookies)
         assert restarted.get('/api/private').status_code == 200
         monkeypatch.setenv('OIDC_ALLOWED_SUBJECTS', '["different-owner"]')
         oidc.get_config.cache_clear()
@@ -301,12 +314,13 @@ def test_session_persistence_expiry_and_owner_removal(client, app, provider, db,
 
 def test_login_rotates_and_revokes_previous_session(client, provider, app, db):
     complete(client, provider)
-    old = client.cookies[oidc.SESSION_COOKIE]
+    old_name = cookie_name(client, oidc.SESSION_COOKIE)
+    old = cookie_value(client, oidc.SESSION_COOKIE)
     complete(client, provider)
-    assert old != client.cookies[oidc.SESSION_COOKIE]
+    assert old != cookie_value(client, oidc.SESSION_COOKIE)
     assert db.query(OIDCSession).count() == 1
     with TestClient(app, base_url=ORIGIN) as other:
-        other.cookies.set(oidc.SESSION_COOKIE, old)
+        other.cookies.set(old_name, old)
         assert other.get('/api/private').status_code == 401
 
 
@@ -391,7 +405,7 @@ def test_live_sse_stops_delivering_after_session_revocation_or_expiry(client, ap
     result = client.get('/api/revocation-stream')
     assert 'data: before' in result.text
     assert 'AFTER_REVOKE_CANARY' not in result.text
-    assert client.cookies.get(oidc.get_config().session_cookie)
+    assert cookie_value(client, oidc.get_config().session_cookie)
     assert client.get('/api/private').status_code == 401
     assert client.get('/api/revocation-stream').status_code == 401
 
@@ -458,17 +472,17 @@ def test_nested_login_ignores_ancestor_cookies(app, db, provider, monkeypatch, a
         started = nested.get('api/auth/oidc/login')
         params = parse_qs(urlsplit(started.headers['location']).query)
         provider['nonce'], provider['challenge'] = params['nonce'][0], params['code_challenge'][0]
-        assert started.headers['set-cookie'].startswith(config.transaction_cookie + '=')
+        assert started.headers['set-cookie'].startswith(config.transaction_cookie + '_')
         callback = nested.get('api/auth/oidc/callback', params={'state': params['state'][0], 'code': 'mock-code'})
         assert callback.headers['location'] == ORIGIN + prefix + '/'
-        assert config.transaction_cookie in nested.cookies
+        assert cookie_value(nested, config.transaction_cookie)
         assert db.query(OIDCLoginTransaction).count() == 0
         status = data(nested.get('api/auth/status'))
         assert status['authenticated']
-        old = nested.cookies[config.session_cookie]
+        old = cookie_value(nested, config.session_cookie)
         headers = {'Origin': ORIGIN, 'X-CSRF-Token': status['csrf_token']}
         assert nested.post('api/auth/logout', headers=headers).status_code == 200
-        assert nested.cookies[config.session_cookie] == old
+        assert cookie_value(nested, config.session_cookie) == old
         assert not data(nested.get('api/auth/status'))['authenticated']
         assert nested.cookies[legacy_name] == 'ancestor-cookie'
         assert not db.query(OIDCSession).filter_by(session_hash=oidc.digest(old)).count()
@@ -476,7 +490,7 @@ def test_nested_login_ignores_ancestor_cookies(app, db, provider, monkeypatch, a
 
 def test_authenticated_root_to_subpath_migration(app, client, db, provider, monkeypatch):
     complete(client, provider)
-    root_cookie = client.cookies[oidc.SESSION_COOKIE]
+    root_cookie = cookie_value(client, oidc.SESSION_COOKIE)
     assert data(client.get('/api/auth/status'))['authenticated']
     prefix = '/apps/panwatch'
     monkeypatch.setenv('PANWATCH_BASE_PATH', prefix)
@@ -493,7 +507,7 @@ def test_authenticated_root_to_subpath_migration(app, client, db, provider, monk
             assert callback.headers['location'] == ORIGIN + prefix + '/'
             assert data(nested.get('api/auth/status'))['authenticated']
         assert config.session_cookie != oidc.SESSION_COOKIE
-        assert nested.cookies[oidc.SESSION_COOKIE] == root_cookie
+        assert cookie_value(nested, oidc.SESSION_COOKIE) == root_cookie
         # Root cookie is ignored; relogin revokes only the prior nested session.
         assert db.query(OIDCSession).filter_by(config_binding=config.binding).count() == 1
         assert db.query(OIDCSession).filter_by(session_hash=oidc.digest(root_cookie)).count() == 1
@@ -514,7 +528,7 @@ def test_nested_transaction_rotation_and_cancel_revoke_only_own_state(app, db, p
         state = parse_qs(urlsplit(second.headers['location']).query)['state'][0]
         result = nested.get('api/auth/oidc/callback', params={'state': state, 'error': 'access_denied'})
         assert result.headers['location'].endswith('oidc_error=cancelled')
-        assert config.transaction_cookie in nested.cookies
+        assert cookie_value(nested, config.transaction_cookie)
         assert 'set-cookie' not in result.headers
         assert nested.cookies[oidc.TRANSACTION_COOKIE] == 'root-transaction'
         assert db.query(OIDCLoginTransaction).count() == 0

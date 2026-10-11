@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 import jwt
 
 from src.platform.persistence.database import get_db, SessionLocal
-from src.platform.persistence.models import AppSettings, OIDCSession
+from src.platform.persistence.models import AppSettings
 from src.modules.administration import oidc
 from src.web.errors import api_error
 
@@ -230,20 +230,17 @@ def auth_status(
 
 
 @router.post("/logout")
-def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+def logout(request: Request, response: Response,
+           credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+           db: Session = Depends(get_db)):
     """Revoke only this browser's local session; never redirect to arbitrary URLs."""
     response.headers["Cache-Control"] = "no-store"
     config = oidc.require_config() if oidc.enabled() else None
     if config:
-        session = oidc.get_session(db, request, config)
-        if session is not None:
-            oidc.check_csrf(request, session, config)
-            db.delete(session)
-            db.commit()
-        # Revocation is authoritative in the database. Do not expire the shared
-        # browser cookie: this response may arrive after another tab signs in,
-        # and Set-Cookie cannot conditionally delete only the old identifier.
-        # The now-inert cookie expires naturally or is replaced by a new login.
+        password_authenticated = bool(config.allow_password and credentials and get_password_hash(db)
+                                      and verify_token(credentials.credentials))
+        oidc.logout_browser(db, request, config, password_authenticated=password_authenticated)
+        # Never expire shared browser state from a potentially delayed logout.
     return {"logged_out": True}
 
 

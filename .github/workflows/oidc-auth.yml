@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -r requirements.txt
-      - run: python -m pytest -q tests/test_oidc_auth.py tests/test_oidc_cookie_lifecycle.py tests/test_oidc_subpath_integration.py tests/test_selfcheck.py tests/test_recommendations_readonly.py tests/test_assistant_exports.py tests/test_static_assets_security.py tests/test_pats_api.py tests/test_rest_boundaries.py tests/test_architecture_boundaries.py
+      - run: python -m pytest -q tests/test_oidc_auth.py tests/test_oidc_cookie_lifecycle.py tests/test_oidc_session_generations.py tests/test_oidc_subpath_integration.py tests/test_selfcheck.py tests/test_recommendations_readonly.py tests/test_assistant_exports.py tests/test_static_assets_security.py tests/test_pats_api.py tests/test_rest_boundaries.py tests/test_architecture_boundaries.py
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -47,5 +47,5 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - run: pnpm run test --run tests/auth tests/api/oidcAuth.test.ts tests/api/oidc-public-path.test.ts tests/api/public-url.test.ts tests/api/health.test.ts tests/api/recommendations.test.ts tests/api/global-overview.test.ts tests/i18n/Login.test.tsx
+      - run: pnpm run test --run tests/auth tests/api/oidcAuth.test.ts tests/api/passwordLogout.test.ts tests/api/oidc-public-path.test.ts tests/api/public-url.test.ts tests/api/health.test.ts tests/api/recommendations.test.ts tests/api/global-overview.test.ts tests/i18n/Login.test.tsx
       - run: pnpm run check:i18n && pnpm run check:market-colors && pnpm run build

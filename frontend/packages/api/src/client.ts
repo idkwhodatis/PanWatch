@@ -181,6 +181,27 @@ export function handleUnauthorized(path: string, status: number): void {
   throw new AuthExpiredError(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
 }
 
+interface PasswordCredential {
+  token: string | null
+  expires: string | null
+}
+
+function passwordCredential(): PasswordCredential | null {
+  // Read the raw pair without expiring it: another tab can replace these keys
+  // without changing this tab's in-memory AuthStatus. Same-second JWTs may be
+  // identical, so the more precise login expiry is part of the identity too.
+  try {
+    return { token: localStorage.getItem('token'), expires: localStorage.getItem('token_expires') }
+  } catch {
+    // Inaccessible storage is an unknown identity, never an empty credential.
+    return null
+  }
+}
+
+function samePasswordCredential(left: PasswordCredential | null, right: PasswordCredential | null): boolean {
+  return left !== null && right !== null && left.token === right.token && left.expires === right.expires
+}
+
 let statusRequest: Promise<AuthStatus> | null = null
 
 function readAuthStatus(fresh = false): Promise<AuthStatus> {
@@ -192,8 +213,11 @@ function readAuthStatus(fresh = false): Promise<AuthStatus> {
   }
   if (statusRequest) return statusRequest
   const revision = getAuthRevision()
-  const request = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' }).then(validateAuthStatus).then(status => {
-    if (revision !== getAuthRevision()) {
+  const response = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' })
+  // Header construction can discard an already expired token. Snapshot after it.
+  const sentCredential = passwordCredential()
+  const request = response.then(validateAuthStatus).then(status => {
+    if (revision !== getAuthRevision() || !samePasswordCredential(sentCredential, passwordCredential())) {
       const current = getAuthStatus()
       if (fresh || !current) throw new Error('Authentication changed')
       return current
@@ -226,6 +250,8 @@ export function logout(): Promise<void> {
     // generic 403s and arbitrary mutations never trigger an automatic replay.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const sentStatus = getAuthStatus()
+      const headers = authHeaders('POST')
+      const sentCredential = passwordCredential()
       const controller = new AbortController()
       const timeout = window.setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
       let res: Response
@@ -233,7 +259,7 @@ export function logout(): Promise<void> {
         res = await fetch(`${API_BASE}/auth/logout`, {
           method: 'POST',
           credentials: 'same-origin',
-          headers: authHeaders('POST'),
+          headers,
           signal: controller.signal,
         })
       } finally {
@@ -243,8 +269,17 @@ export function logout(): Promise<void> {
         const body: ApiResponse<unknown> = await res.json().catch(() => ({ code: res.status, data: null, message: `HTTP ${res.status}` }))
         if (!res.ok || body.code !== 0 || body.success === false) {
           if (attempt === 0 && res.status === 403 && body.error_code === 'csrf_invalid') {
-            if (!sameAuthSession(sentStatus, getAuthStatus())) throw new Error('Authentication changed')
-            const current = await readAuthStatus(true)
+            if (!sameAuthSession(sentStatus, getAuthStatus())
+              || !samePasswordCredential(sentCredential, passwordCredential())) throw new Error('Authentication changed')
+            const refresh = readAuthStatus(true)
+            const refreshCredential = passwordCredential()
+            const current = await refresh
+            // setAuthStatus intentionally removes password credentials for OIDC
+            // and SSO-only policy. All other changes still belong to a newer login.
+            const currentCredential = !current.password_enabled || current.auth_method === 'oidc'
+              ? { token: null, expires: null } : refreshCredential
+            if (!sameAuthSession(current, getAuthStatus())
+              || !samePasswordCredential(currentCredential, passwordCredential())) throw new Error('Authentication changed')
             if (!current.authenticated) {
               // The fresh read confirms the cookie is already expired/revoked.
               clearAuthSession()
@@ -257,7 +292,8 @@ export function logout(): Promise<void> {
         }
       }
       // Never erase a newer session established while this logout was in flight.
-      if (!sameAuthSession(sentStatus, getAuthStatus())) throw new Error('Authentication changed')
+      if (!sameAuthSession(sentStatus, getAuthStatus())
+        || !samePasswordCredential(sentCredential, passwordCredential())) throw new Error('Authentication changed')
       // Success or 401 confirms there is no old server session left to revoke.
       clearAuthSession()
       redirectToLogin()
