@@ -10,7 +10,7 @@ function worker(scope: string) {
   const prefix = new URL(scope).pathname
   const caches = {
     open: vi.fn().mockResolvedValue(cache),
-    keys: vi.fn().mockResolvedValue([`panwatch:${prefix}:v2`, `panwatch:${prefix}:v3`, 'another-app-cache', 'panwatch:/other/:v2']),
+    keys: vi.fn().mockResolvedValue([`panwatch:${prefix}:v3`, `panwatch:${prefix}:v4`, 'another-app-cache', 'panwatch:/other/:v2']),
     delete: vi.fn().mockResolvedValue(true),
   }
   const fetch = vi.fn().mockResolvedValue(new Response('ok'))
@@ -27,12 +27,12 @@ describe.each(['/', '/panwatch/', '/apps/panwatch/'])('service worker scope %s',
     w.listeners.install(event); w.listeners.activate(event)
     await Promise.all(promises)
     expect(w.cache.addAll).toHaveBeenCalledWith(['', 'manifest.json', 'manifest.zh-CN.json', 'icon-192.png', 'icon-512.png'].map(path => `https://example.test${prefix}${path}`))
-    expect(w.caches.delete.mock.calls).toEqual([[`panwatch:${prefix}:v2`]])
+    expect(w.caches.delete.mock.calls).toEqual([[`panwatch:${prefix}:v3`]])
   })
 
   it('does not intercept API/protocol/non-GET/foreign-origin requests', () => {
     const w = worker(`https://example.test${prefix}`)
-    const paths = ['api/auth/status', 'api/notifications/stream', 'api', 'mcp', 'mcp/stream', 'docs', 'openapi.json', '.well-known/oauth-protected-resource', 'apps/panwatch/api/private', 'apps/panwatch/api/auth/status', 'apps/panwatch/mcp', 'apps/panwatch/assets/app.js', 'unrelated/private-page', 'login']
+    const paths = ['api/auth/status', 'api/notifications/stream', 'api', 'mcp', 'mcp/stream', 'docs', 'openapi.json', '.well-known/oauth-protected-resource', 'apps/panwatch/api/private', 'apps/panwatch/api/auth/status', 'apps/panwatch/mcp', 'apps/panwatch/assets/app.js', 'unrelated/private-page', 'login', 'assets/panwatch/assets/app.js', 'assets/panwatch/login']
     for (const path of paths) {
       const respondWith = vi.fn()
       w.listeners.fetch({request: new Request(`https://example.test${prefix}${path}`), respondWith})
@@ -48,6 +48,23 @@ describe.each(['/', '/panwatch/', '/apps/panwatch/'])('service worker scope %s',
     }
   })
 
+
+  it('does not cache HTML or redirected responses behind flat asset URLs', async () => {
+    const w = worker(`https://example.test${prefix}`)
+    const request = new Request(`https://example.test${prefix}assets/panwatch.js`)
+    for (const redirected of [false, true]) {
+      const response = new Response('other app', {headers: {'Content-Type': redirected ? 'application/javascript' : 'text/html; charset=utf-8'}})
+      Object.defineProperty(response, 'redirected', {value: redirected})
+      w.fetch.mockResolvedValue(response)
+      let pending: Promise<Response> | undefined
+      const jobs: Promise<unknown>[] = []
+      w.listeners.fetch({request, respondWith: (p: Promise<Response>) => {pending = p}, waitUntil: (p: Promise<unknown>) => jobs.push(p)})
+      expect(await (await pending!).text()).toBe('other app')
+      await Promise.all(jobs)
+      expect(w.cache.put).not.toHaveBeenCalled()
+    }
+  })
+
   it('caches and falls back only inside this installation', async () => {
     const w = worker(`https://example.test${prefix}`)
     const request = new Request(`https://example.test${prefix}assets/app.js`)
@@ -57,7 +74,7 @@ describe.each(['/', '/panwatch/', '/apps/panwatch/'])('service worker scope %s',
     w.listeners.fetch(event)
     expect(await (await response!).text()).toBe('ok')
     await Promise.all(jobs)
-    expect(w.caches.open).toHaveBeenCalledWith(`panwatch:${prefix}:v3`)
+    expect(w.caches.open).toHaveBeenCalledWith(`panwatch:${prefix}:v4`)
     expect(w.cache.put).toHaveBeenCalledWith(request, expect.any(Response))
     w.fetch.mockRejectedValue(new Error('offline'))
     w.cache.match.mockResolvedValue(new Response('cached'))
