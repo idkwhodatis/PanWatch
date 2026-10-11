@@ -16,8 +16,12 @@ on:
       - 'tests/test_subpath_build.py'
       - 'tests/test_mcp_public_path.py'
       - 'tests/test_static_assets_security.py'
+      - 'src/modules/research/analysis_link.py'
+      - 'src/modules/administration/api/settings.py'
+      - 'docs/reverse-proxy-subpath.md'
+      - 'tests/test_analysis_link_settings.py'
   push:
-    branches: [main]
+    branches: [main, master]
     paths:
       - '.github/workflows/reverse-proxy-subpath.yml'
       - 'requirements*.txt'
@@ -32,6 +36,10 @@ on:
       - 'tests/test_subpath_build.py'
       - 'tests/test_mcp_public_path.py'
       - 'tests/test_static_assets_security.py'
+      - 'src/modules/research/analysis_link.py'
+      - 'src/modules/administration/api/settings.py'
+      - 'docs/reverse-proxy-subpath.md'
+      - 'tests/test_analysis_link_settings.py'
 
 permissions:
   contents: read
@@ -63,13 +71,13 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Frontend prefix and service-worker contracts
         working-directory: frontend
-        run: pnpm run test --run tests/api/base-path.test.tsx tests/api/service-worker-scope.test.ts tests/routing/analysis-modal-public-links.test.tsx
+        run: pnpm run test --run tests/api/base-path.test.tsx tests/api/public-url.test.ts tests/api/service-worker-scope.test.ts tests/routing/analysis-modal-public-links.test.tsx tests/routing/markdown-fragments.test.tsx tests/routing/markdown-footnote-identity.test.tsx
       - name: Build the single runtime-configurable frontend
         working-directory: frontend
         run: pnpm build
       - name: ASGI, authentication, SSE and production-asset matrix
-        run: python -m pytest -q tests/test_public_path.py tests/test_subpath_build.py tests/test_static_assets_security.py tests/test_mcp_public_path.py tests/test_mcp_server.py
+        run: python -m pytest -q tests/test_public_path.py tests/test_subpath_build.py tests/test_static_assets_security.py tests/test_mcp_public_path.py tests/test_mcp_server.py tests/test_analysis_link_settings.py
       - name: Verify minimum supported routing dependencies
         run: |
           python -m pip install 'fastapi==0.110.1' 'starlette==0.37.2'
-          python -m pytest -q tests/test_public_path.py tests/test_subpath_build.py tests/test_static_assets_security.py tests/test_mcp_public_path.py tests/test_mcp_server.py
+          python -m pytest -q tests/test_public_path.py tests/test_subpath_build.py tests/test_static_assets_security.py tests/test_mcp_public_path.py tests/test_mcp_server.py tests/test_analysis_link_settings.py
