@@ -31,3 +31,4 @@ CLAUDE.md
 docs/superpowers/
 .superpowers/
 .worktrees/
+.requirements-*.txt

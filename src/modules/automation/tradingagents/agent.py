@@ -485,6 +485,8 @@ class TradingAgentsAgent(BaseAgent):
         try:
             import tradingagents  # noqa: F401
             from tradingagents.graph.trading_graph import TradingAgentsGraph  # noqa: F401
+            from .source_contract import validate_source_contract
+            validate_source_contract()
         except ImportError as e:
             return False, (
                 "tradingagents 未安装。运行 `pip install -r requirements.txt` "
