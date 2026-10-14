@@ -144,7 +144,14 @@ export function localizedApiError(body: ApiResponse<unknown>, status: number): s
 }
 
 export function getToken(): string | null {
-  return localStorage.getItem('token')
+  const token = localStorage.getItem('token')
+  const expires = localStorage.getItem('token_expires')
+  if (token && expires && (!Number.isFinite(Date.parse(expires)) || Date.parse(expires) <= Date.now())) {
+    localStorage.removeItem('token')
+    localStorage.removeItem('token_expires')
+    return null
+  }
+  return token
 }
 
 export function logout() {
@@ -154,15 +161,7 @@ export function logout() {
 }
 
 export function isAuthenticated(): boolean {
-  const token = getToken()
-  if (!token) return false
-
-  const expires = localStorage.getItem('token_expires')
-  if (expires && new Date(expires) < new Date()) {
-    logout()
-    return false
-  }
-  return true
+  return getToken() !== null
 }
 
 export interface ApiRequestOptions extends RequestInit {
@@ -181,6 +180,13 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     headers['Content-Type'] = 'application/json'
   }
 
+  // Snapshot both values: same-second logins can issue identical JWTs with
+  // different expiry strings. A delayed 401 must not erase a newer login.
+  const expires = localStorage.getItem('token_expires')
+  const requestHeaders = new Headers(headers)
+  new Headers(options?.headers).forEach((value, key) => requestHeaders.set(key, value))
+  const usesStoredToken = !!token && requestHeaders.get('Authorization') === `Bearer ${token}`
+
   const timeoutController = options?.signal ? null : new AbortController()
   const timeoutMs = typeof options?.timeoutMs === 'number' && options.timeoutMs > 0
     ? options.timeoutMs
@@ -194,10 +200,7 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     const { timeoutMs: _timeoutMs, ...requestOptions } = options || {}
     res = await fetch(`${API_BASE}${path}`, {
       ...requestOptions,
-      headers: {
-        ...headers,
-        ...(requestOptions.headers as Record<string, string> | undefined),
-      },
+      headers: requestHeaders,
       signal: requestOptions.signal || timeoutController?.signal,
     })
   } catch (error: any) {
@@ -211,7 +214,11 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     }
   }
 
-  if (res.status === 401 && token) {
+  const authEndpoint = ['/auth/status', '/auth/login', '/auth/setup'].includes(path.split('?')[0])
+  if (res.status === 401 && usesStoredToken && !authEndpoint && !options?.signal?.aborted) {
+    if (localStorage.getItem('token') !== token || localStorage.getItem('token_expires') !== expires) {
+      throw new Error(interfaceText('登录状态已变化，请重试', 'Your session changed. Try again.'))
+    }
     logout()
     throw new Error(interfaceText('登录已过期', 'Your session has expired. Sign in again.'))
   }
