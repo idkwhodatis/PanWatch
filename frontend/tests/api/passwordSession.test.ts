@@ -86,7 +86,7 @@ describe('local password session lifecycle', () => {
     [['Authorization', 'Bearer synthetic-custom']] as [string, string][],
   ])('preserves login when caller supplies a different credential (%s)', async headers => {
     login(); const fetch = vi.fn().mockResolvedValue(unauthorized()); vi.stubGlobal('fetch', fetch)
-    await expect(fetchAPI('/stocks', { headers })).rejects.toThrow('The username or password is incorrect.')
+    await expect(fetchAPI('/stocks', { headers })).rejects.toThrow('Your session changed or could not be verified.')
     expect(new Headers(fetch.mock.calls[0][1].headers).get('Authorization')).toBe('Bearer synthetic-custom')
     expect(getToken()).toBe('synthetic-old')
   })
