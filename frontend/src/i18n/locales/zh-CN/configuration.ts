@@ -1,4 +1,16 @@
 export const configuration = {
+  marketExtensions: {
+    title: '可选市场',
+    description: '默认关闭。启用市场仅允许使用已安装的能力，关闭后保留已保存的记录。',
+    names: { canada: '加拿大' },
+    installed: '已安装的能力如下。',
+    notInstalled: '当前版本仅提供配置入口，尚未安装该市场的行情和持仓能力。',
+    available: '已安装', unavailable: '暂不支持',
+    failed: '无法读取或保存市场设置，当前显示可能不是最新状态。请刷新核实。',
+    retry: '刷新设置',
+    capabilities: { quotes: '行情', klines: '日 K 线', search: '搜索', watchlist: '自选', holdings: '手动持仓', analysis: '分析', scanning: '扫描', paper_trading: '模拟交易' },
+  },
+
   notifications: {
     previewTitle: '通知',
     readAll: '全部已读',

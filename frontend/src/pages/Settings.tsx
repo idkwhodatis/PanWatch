@@ -5,6 +5,7 @@ import { fetchAPI, type AIService, type AIModel, type NotifyChannel } from '@pan
 import { useAvatar, saveAvatar, fileToAvatarDataUrl } from '@/hooks/use-avatar'
 import { buildTemplateImportFeedback, type TemplateImportSummary } from '@/lib/template-import-feedback'
 import PatSection from '@/components/PatSection'
+import MarketExtensionsSection from '@/components/MarketExtensionsSection'
 import { useGuidedTour } from '@/components/onboarding/GuidedTour'
 import { UserAvatar } from '@/components/UserAvatar'
 import { Input } from '@panwatch/base-ui/components/ui/input'
@@ -1072,6 +1073,7 @@ export default function SettingsPage() {
 
         {/* MCP 访问令牌 */}
         <PatSection className="lg:col-span-7" />
+        <MarketExtensionsSection />
 
       </div>
 
