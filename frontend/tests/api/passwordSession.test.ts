@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchAPI, getToken, isAuthenticated, logout } from '../../packages/api/src/client'
 
+import { setAuthStatus } from '../../packages/api/src/auth-session'
+
 const expiry = '2099-01-01T00:00:00.000Z'
 function login(token = 'synthetic-old', expires = expiry) {
   localStorage.setItem('token', token)
@@ -13,15 +15,18 @@ function unauthorized() {
 describe('local password session lifecycle', () => {
   beforeEach(() => {
     localStorage.clear()
+    setAuthStatus({ initialized: true, oidc_enabled: false, password_enabled: true, authenticated: false, auth_method: null, csrf_token: null, oidc_login_url: null })
     localStorage.setItem('panwatch-locale', 'en-US')
     vi.stubGlobal('window', { location: { href: '/portfolio' }, setTimeout, clearTimeout })
   })
   afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
-  it('keeps a valid local login and allows explicit logout', () => {
+  it('keeps a valid local login and allows explicit logout', async () => {
     login()
+    setAuthStatus({ initialized: true, oidc_enabled: false, password_enabled: true, authenticated: true, auth_method: 'password', csrf_token: null, oidc_login_url: null })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({ code: 0 }) }))
     expect(isAuthenticated()).toBe(true)
-    logout()
+    await logout()
     expect(getToken()).toBeNull()
     expect(localStorage.getItem('token_expires')).toBeNull()
     expect(window.location.href).toBe('/login')
@@ -62,7 +67,7 @@ describe('local password session lifecycle', () => {
     if (scenario === 'already-logged-out') { localStorage.removeItem('token'); localStorage.removeItem('token_expires') }
     const before = [localStorage.getItem('token'), localStorage.getItem('token_expires')]
     resolve(unauthorized())
-    await expect(request).rejects.toThrow('Your session changed.')
+    await expect(request).rejects.toThrow('Your session changed or could not be verified.')
     expect([localStorage.getItem('token'), localStorage.getItem('token_expires')]).toEqual(before)
     expect(window.location.href).toBe('/portfolio')
     expect(fetch).toHaveBeenCalledTimes(1)
