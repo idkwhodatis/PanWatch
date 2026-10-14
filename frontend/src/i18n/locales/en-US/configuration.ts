@@ -2,6 +2,18 @@ import type { TranslationShape } from '../../resource-types'
 import { configuration as zhConfiguration } from '../zh-CN/configuration'
 
 export const configuration = {
+  marketExtensions: {
+    title: 'Optional markets',
+    description: 'Off by default. Enabling a market only permits installed capabilities. Turning it off preserves saved records.',
+    names: { canada: 'Canada' },
+    installed: 'Installed capabilities are listed below.',
+    notInstalled: 'Configuration only: market data and portfolio capabilities are not installed in this version.',
+    available: 'Installed', unavailable: 'Not supported',
+    failed: 'Could not read or save market settings. The displayed state may be out of date. Retry to verify.',
+    retry: 'Refresh settings',
+    capabilities: { quotes: 'Quotes', klines: 'Daily bars', search: 'Search', watchlist: 'Watchlist', holdings: 'Manual holdings', analysis: 'Analysis', scanning: 'Scanning', paper_trading: 'Paper trading' },
+  },
+
   notifications: {
     previewTitle: 'Notifications',
     readAll: 'Mark all read',
