@@ -9,7 +9,7 @@ import { onboardingApi, type SetupStatus } from '@panwatch/api/onboarding'
 
 vi.mock('@panwatch/api', () => ({
   dashboardApi: {
-    indices: vi.fn(), intradaySnapshot: vi.fn(), overview: vi.fn(), portfolioSummary: vi.fn(),
+    indices: vi.fn(), marketOverview: vi.fn(), intradaySnapshot: vi.fn(), overview: vi.fn(), portfolioSummary: vi.fn(),
     marketStatus: vi.fn(), brief: vi.fn(), curate: vi.fn(),
   },
   portfolioApi: { diagnostics: vi.fn(), benchmark: vi.fn(), attribution: vi.fn() },
@@ -109,6 +109,20 @@ describe('dashboard progressive loading', () => {
     expect(dashboardApi.curate).not.toHaveBeenCalled()
     await act(async () => { snapshot.resolve({ stocks: [] }); alerts.resolve([]) })
     await waitFor(() => expect(dashboardApi.curate).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps fast homepage content visible after the market overview times out', async () => {
+    const market = deferred<[]>()
+    vi.mocked(dashboardApi.marketOverview).mockReturnValue(market.promise)
+    vi.mocked(homeApi.todos).mockResolvedValue({ todos: [{ type: 'no_alert', name: '待办标的', symbol: '000001', market: 'CN' }] })
+    render(<MemoryRouter><DashboardPage /></MemoryRouter>)
+    expect(await screen.findByText(/待办标的/)).toBeTruthy()
+    expect(screen.getByText('正在加载全球市场…')).toBeTruthy()
+    await act(async () => market.reject(new Error('Request timed out')))
+    expect(screen.getByText(/待办标的/)).toBeTruthy()
+    expect(dashboardApi.marketOverview).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText('正在加载全球市场…')).toBeNull()
+    expect(screen.getByText('市场数据暂不可用，请尝试刷新。')).toBeTruthy()
   })
 
   it('loads fallback opportunities immediately if overview fails without waiting for quotes', async () => {
