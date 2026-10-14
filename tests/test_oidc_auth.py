@@ -531,7 +531,7 @@ def test_oidc_http_redaction_does_not_hide_concurrent_unrelated_diagnostics(capl
     assert 'OIDC_SECRET_CANARY' not in caplog.text
 
 
-@pytest.mark.parametrize('prefix,public_path', [('/panwatch', '/panwatch'), ('/apps/panwatch', '/apps/panwatch'), ('/panwatch', ''), ('', '/panwatch')])
+@pytest.mark.parametrize('prefix,public_path', [('/panwatch', '/panwatch'), ('/apps/panwatch', '/apps/panwatch'), ('/panwatch', ''), ('', '/panwatch'), ('//', '')])
 def test_subpath_configuration_fails_closed(client, monkeypatch, prefix, public_path):
     monkeypatch.setenv('PANWATCH_BASE_PATH', prefix)
     monkeypatch.setenv('OIDC_PUBLIC_URL', ORIGIN + public_path)

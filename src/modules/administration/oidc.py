@@ -153,8 +153,8 @@ def get_config() -> OIDCConfig | None:
     allow_http = _flag(values, "OIDC_ALLOW_HTTP_LOCALHOST")
     issuer = _valid_url(values.get("OIDC_ISSUER", "").strip(), allow_http, issuer=True)
     public_url = _valid_url(values.get("OIDC_PUBLIC_URL", "").strip(), allow_http)
-    base_path = values.get("PANWATCH_BASE_PATH", "").strip().rstrip("/")
-    if base_path or urlsplit(public_url).path.rstrip("/"):
+    base_path = values.get("PANWATCH_BASE_PATH", "").strip()
+    if base_path not in {"", "/"} or urlsplit(public_url).path.rstrip("/"):
         raise OIDCError("This OIDC stage supports root-path deployments only")
     client_id = values.get("OIDC_CLIENT_ID", "").strip()
     if not client_id:
