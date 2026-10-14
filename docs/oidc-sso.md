@@ -78,7 +78,7 @@ MCP continues to use its existing scoped `pwmcp_` personal access tokens; OIDC i
 
 ## Read-only GET and API migration
 
-Cookie CSRF protection depends on GET/HEAD/OPTIONS remaining observational. Integrations using older action-by-GET endpoints must migrate:
+Cookie CSRF protection classifies GET/HEAD/OPTIONS as safe methods: they must not execute user-directed mutations, paid probes or notification actions. This is not a claim that every existing read handler is database-write-free; some settings/account reads lazily initialize default rows. Integrations using older action-by-GET endpoints must migrate:
 
 - Execute selfchecks with `POST /api/health/selfcheck`; existing `notify_send` and comma-separated `keys` query parameters are unchanged. Only `GET /api/health/selfcheck?list=1` remains read-only. Other GET requests return 405 and `Allow: POST`, including when notification sending is false, because AI probes may spend quota. The frontend already sends POST for both complete and per-item checks.
 - Refresh entry candidates with the existing `POST /api/recommendations/entry-candidates/refresh`. `GET /api/recommendations/entry-candidates?refresh=true` returns an explicit migration error without changing candidates. Normal candidate-list GETs remain supported; the frontend SDK no longer exposes a `refresh` option on `listEntryCandidates`, so use `refreshEntryCandidates` followed by a list read.

@@ -84,7 +84,7 @@ MCP 仍使用现有带 scope 的 `pwmcp_` PAT，按自己的过期和撤销规�
 
 ## GET 只读与接口迁移
 
-Cookie CSRF 防护要求 GET/HEAD/OPTIONS 不触发业务操作。旧版调用方请按以下方式迁移：
+Cookie CSRF 防护将 GET/HEAD/OPTIONS 归为安全方法：不得执行用户指定的修改、收费探测或通知发送。这不表示所有现有读取接口都完全不写数据库；部分设置和账户读取会延迟初始化默认记录。旧版调用方请按以下方式迁移：
 
 - 执行自检改用 `POST /api/health/selfcheck`，原有 `notify_send` 和逗号分隔的 `keys` 查询参数不变。只有 `GET /api/health/selfcheck?list=1` 返回只读清单；其他 GET 返回 405 和 `Allow: POST`。即使不发通知，AI 探测仍可能消耗配额。前端全部和逐项自检均已改为 POST。
 - 刷新入场候选使用已有 `POST /api/recommendations/entry-candidates/refresh`。旧 `GET /api/recommendations/entry-candidates?refresh=true` 返回明确的迁移错误，不改变数据；普通列表 GET 保持可用。前端 SDK 的 `listEntryCandidates` 已移除 `refresh` 选项，需先调用 `refreshEntryCandidates` 再读列表。
