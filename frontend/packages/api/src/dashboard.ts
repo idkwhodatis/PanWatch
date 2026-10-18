@@ -149,8 +149,8 @@ export interface DashboardMonitorStock {
   symbol: string
   name: string
   market: string
-  current_price: number
-  change_pct: number
+  current_price: number | null
+  change_pct: number | null
   open_price: number | null
   high_price: number | null
   low_price: number | null
@@ -199,7 +199,7 @@ export interface DashboardRiskSignalItem extends StrategySignalItem {
 
 export interface DashboardOverviewResponse {
   generated_at: string
-  market: 'ALL' | 'CN' | 'HK' | 'US'
+  market: 'ALL' | 'CN' | 'HK' | 'US' | 'TSX' | 'TSXV'
   snapshot_date: string
   data_freshness: {
     strategy_snapshot_date: string
@@ -213,6 +213,7 @@ export interface DashboardOverviewResponse {
     available_funds: number
     invested_cost: number
     total_assets_estimate: number
+    valuation_incomplete?: boolean
     executable_opportunities: number
     risk_positions: number
     win_rate_3d?: number | null
@@ -224,10 +225,12 @@ export interface DashboardOverviewResponse {
     watchlist_count: number
     available_funds: number
     invested_cost: number
+    valuation_incomplete?: boolean
     by_market: Array<{
       market: string
       positions: number
       invested_cost: number
+      valuation_incomplete?: boolean
     }>
   }
   action_center: {
@@ -276,7 +279,7 @@ export const dashboardApi = {
   intradaySnapshot: () => fetchAPI<DashboardIntradaySnapshotResponse>('/agents/intraday/snapshot'),
 
   overview: (params?: {
-    market?: 'ALL' | 'CN' | 'HK' | 'US'
+    market?: 'ALL' | 'CN' | 'HK' | 'US' | 'TSX' | 'TSXV'
     action_limit?: number
     risk_limit?: number
     days?: number
