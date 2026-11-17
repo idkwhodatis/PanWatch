@@ -1,6 +1,7 @@
 import asyncio
 from copy import deepcopy
 import logging
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from src.modules.automation.agent_catalog import (
     infer_agent_kind,
 )
 from src.modules.automation.agent_runs import ACTIVE_RUN_TTL_SEC, _as_utc
+from src.modules.research.orchestration.models import ResearchRun
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,13 @@ def _public_agent_config(config: dict | None) -> dict:
     return value
 
 
+def _scheduler_agent_names():
+    """Live scheduler registrations; None when the server module is absent (tests, scripts)."""
+    runtime = sys.modules.get("server")
+    agents = getattr(getattr(runtime, "scheduler", None), "agents", None)
+    return set(agents) if isinstance(agents, dict) else None
+
+
 @router.get("/health")
 def agents_health(
     include_internal: bool = Query(default=False),
@@ -108,6 +117,7 @@ def agents_health(
 
     now = datetime.now(tzinfo)
     horizon = now + timedelta(hours=24)
+    registered = _scheduler_agent_names()
 
     query = db.query(AgentConfig)
     if not include_internal:
@@ -151,6 +161,13 @@ def agents_health(
             if a.enabled and (last.status or "") == "failed":
                 recent_failed_count += 1
 
+        scheduled = None
+        warnings: list[str] = []
+        if registered is not None:
+            scheduled = a.name in registered
+            if a.enabled and (a.kind or infer_agent_kind(a.name)) == AGENT_KIND_WORKFLOW and not scheduled:
+                warnings.append("已启用但未注册到调度器：没有任何个股绑定或调度计划，请在股票详情中绑定后重载调度器")
+
         out.append(
             {
                 "name": a.name,
@@ -162,6 +179,8 @@ def agents_health(
                 "execution_mode": a.execution_mode or "batch",
                 "next_runs": next_runs,
                 "last_run": last_run,
+                "scheduled": scheduled,
+                "warnings": warnings,
             }
         )
 
@@ -271,6 +290,15 @@ def list_capabilities(db: Session = Depends(get_db)):
     return [_agent_to_response(a) for a in rows]
 
 
+@router.get("/research-templates")
+def research_templates(agent_name: str):
+    from src.modules.research.orchestration.policies import templates_for
+    try:
+        return templates_for(agent_name)
+    except ValueError as exc:
+        raise api_error(400, "research_config_invalid", str(exc)) from exc
+
+
 @router.put("/{agent_name}", response_model=AgentConfigResponse)
 def update_agent(
     agent_name: str, update: AgentConfigUpdate, db: Session = Depends(get_db)
@@ -287,6 +315,14 @@ def update_agent(
     for key, value in update.model_dump(exclude_unset=True).items():
         if key == "config":
             value = _public_agent_config(value)
+            if "research_graph" in value:
+                from src.modules.research.orchestration.service import validate_config
+                try:
+                    if agent_name not in {"daily_report", "premarket_outlook", "intraday_monitor"}:
+                        raise ValueError("research graph is unavailable for this agent")
+                    validate_config(value["research_graph"], agent_name)
+                except (ValueError, TypeError) as exc:
+                    raise api_error(400, "research_config_invalid", str(exc)) from exc
         setattr(agent, key, value)
 
     # capability 仅支持手动调用，不参与调度。
@@ -640,7 +676,7 @@ def get_run_progress(trace_id: str, db: Session = Depends(get_db)):
         "completed_stages": [...],
         "elapsed_sec": float,
         "total_cost_usd": float,
-        "stages": [{"name": ..., "status": "pending"|"running"|"done"}, ...],
+        "stages": [{"name": ..., "status": "pending"|"running"|"done"|"failed"|"review"}, ...],
         "run": {  # 最终 AgentRun(已完成时)
             "status": ..., "result": ..., "error": ..., "duration_ms": ...
         }
@@ -651,6 +687,28 @@ def get_run_progress(trace_id: str, db: Session = Depends(get_db)):
     if not trace_id or len(trace_id) > 64:
         raise api_error(400, "trace_id_invalid", "无效的 trace_id")
 
+    research = db.query(ResearchRun).filter(ResearchRun.trace_id == trace_id).order_by(ResearchRun.created_at.desc()).first()
+    if research:
+        progress = research.progress or {}
+        # A provider/tool reply is not a validated role result. Only explicit
+        # completion events advance the graph; preserve failure/review states.
+        stages = [{"name": role, "status": "done" if event.get("status") in {"done", "skipped"}
+                   else event["status"] if event.get("status") in {"failed", "review"} else "running"}
+                  for role, event in progress.items()]
+        active = [s["name"] for s in stages if s["status"] == "running"]
+        lifecycle = db.query(AgentRun).filter(AgentRun.trace_id == trace_id).order_by(AgentRun.id.desc()).first()
+        status = "running" if research.status == "running" else "failed" if research.status == "failed" else "success"
+        if research.engine == "shadow" and lifecycle:
+            status = lifecycle.status
+        if status == "running" and datetime.now(timezone.utc) - _as_utc(research.created_at) > timedelta(seconds=ACTIVE_RUN_TTL_SEC):
+            status = "stale"
+        ended = _as_utc(research.finished_at) or datetime.now(timezone.utc)
+        return {"trace_id": trace_id, "engine": research.engine, "status": status,
+                "completion": (research.payload or {}).get("completion"), "research_reason": (research.payload or {}).get("reason"),
+                "result_status": (research.payload or {}).get("status"), "current_stage": active[-1] if active and status == "running" else "completed",
+                "stages": stages, "completed_stages": [s["name"] for s in stages if s["status"] == "done"],
+                "usage": (research.payload or {}).get("usage") or next((e["usage"] for e in reversed(list(progress.values())) if e.get("usage")), {}), "run": {"status": status, "result": lifecycle.result if lifecycle else "", "error": lifecycle.error if lifecycle else ""},
+                "elapsed_sec": max(0, (ended - _as_utc(research.created_at)).total_seconds()), "total_cost_usd": None}
     logs = (
         db.query(LogEntry)
         .filter(
