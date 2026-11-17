@@ -291,7 +291,7 @@ function readAuthStatus(fresh = false, signal?: AbortSignal): Promise<AuthStatus
   const revision = getAuthRevision()
   const previous = getAuthStatus()
   const passwordSuppressed = !!previous && (!previous.password_enabled || previous.auth_method === 'oidc')
-  const response = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store' })
+  const response = fetchAPI<AuthStatus>('/auth/status', { cache: 'no-store', signal })
   // Header construction can discard an already expired token. Snapshot after it.
   const sentCredential = passwordCredential()
   const changedStatus = (): AuthStatus | null => {
@@ -313,7 +313,7 @@ function readAuthStatus(fresh = false, signal?: AbortSignal): Promise<AuthStatus
     if (passwordSuppressed && !status.authenticated && status.password_enabled && sentCredential?.token
       && !(sentCredential.expires && new Date(sentCredential.expires).getTime() <= Date.now())) {
       status = validateAuthStatus(await fetchAPI<AuthStatus>('/auth/status', {
-        cache: 'no-store', headers: { Authorization: `Bearer ${sentCredential.token}` },
+        cache: 'no-store', signal, headers: { Authorization: `Bearer ${sentCredential.token}` },
       }))
       const changed = changedStatus()
       if (changed) return changed
@@ -423,46 +423,48 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
     headers[key] = value
   })
 
-  const timeoutController = options?.signal ? null : new AbortController()
+  const timeoutController = new AbortController()
+  const callerSignal = options?.signal
+  const cancel = () => timeoutController.abort(callerSignal?.reason)
+  if (callerSignal?.aborted) cancel()
+  else callerSignal?.addEventListener('abort', cancel, { once: true })
+  let timedOut = false
   const timeoutMs = typeof options?.timeoutMs === 'number' && options.timeoutMs > 0
     ? options.timeoutMs
     : DEFAULT_TIMEOUT_MS
-  const timeoutId = timeoutController
-    ? window.setTimeout(() => timeoutController.abort(), timeoutMs)
-    : null
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true
+    timeoutController.abort()
+  }, timeoutMs)
 
-  const sentAuth = captureAuthRequest(headers, options?.signal || timeoutController?.signal)
-  let res: Response
+  const sentAuth = captureAuthRequest(headers, timeoutController.signal)
   try {
     const { timeoutMs: _timeoutMs, ...requestOptions } = options || {}
-    res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(`${API_BASE}${path}`, {
       ...requestOptions,
       credentials: 'same-origin',
       headers,
-      signal: requestOptions.signal || timeoutController?.signal,
+      signal: timeoutController.signal,
     })
+    await handleUnauthorized(path, res.status, sentAuth)
+    const body: ApiResponse<T> = await res.json().catch((error) => {
+      if (timeoutController.signal.aborted) throw error
+      return { code: res.status, data: null as T, message: `HTTP ${res.status}` }
+    })
+    if (body.code !== 0 || body.success === false) {
+      throw new Error(localizedApiError(body, res.status))
+    }
+    return body.data
   } catch (error: any) {
-    if (error?.name === 'AbortError') {
+    if (timedOut) {
       throw new Error(interfaceText('请求超时，请稍后重试', 'The request timed out. Try again later.'))
     }
+    // Preserve AbortError for callers that intentionally cancel stale requests.
     throw error
   } finally {
-    if (timeoutId !== null) {
-      window.clearTimeout(timeoutId)
-    }
+    window.clearTimeout(timeoutId)
+    callerSignal?.removeEventListener('abort', cancel)
   }
-
-  await handleUnauthorized(path, res.status, sentAuth)
-
-  const body: ApiResponse<T> = await res.json().catch(() => ({
-    code: res.status,
-    data: null as T,
-    message: `HTTP ${res.status}`,
-  }))
-  if (body.code !== 0 || body.success === false) {
-    throw new Error(localizedApiError(body, res.status))
-  }
-  return body.data
 }
 
 export const apiClient = {

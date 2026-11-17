@@ -326,7 +326,7 @@ it('bounds the bearer probe with the normal timeout without losing either tab lo
   vi.stubGlobal('fetch', fetch)
   const pending = start('API mutation')
   await vi.advanceTimersByTimeAsync(20000)
-  expect(await pending).toBeInstanceOf(client.AuthChangedError)
+  expect((await pending).message).toMatch(/超时|timed out/)
   expect(fetch).toHaveBeenCalledTimes(3)
   expect(fetch.mock.calls[2][1].signal.aborted).toBe(true)
   expect(session.getAuthStatus()).toBe(oidc)

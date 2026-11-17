@@ -267,7 +267,7 @@ it('bounds cookie status verification with the normal timeout and preserves stat
   vi.stubGlobal('fetch', fetch)
   const pending = start('API mutation')
   await vi.advanceTimersByTimeAsync(20000)
-  expect(await pending).toBeInstanceOf(client.AuthChangedError)
+  expect((await pending).message).toMatch(/超时|timed out/)
   expect(fetch).toHaveBeenCalledTimes(2)
   expect(fetch.mock.calls[1][1].signal.aborted).toBe(true)
   expect(session.getAuthStatus()).toEqual(oidcStatus)
@@ -379,4 +379,33 @@ it.each(['API mutation', 'SSE mutation'] as const)('preserves an independently p
   expect(session.getAuthStatus()).toEqual(newer)
   expect(location.href).toBe('')
   expect(fetch).toHaveBeenCalledTimes(3)
+})
+
+
+it.each(['deadline', 'caller abort'])('propagates %s through cookie verification without clearing authentication', async mode => {
+  vi.useFakeTimers()
+  session.setAuthStatus(oidcStatus)
+  const controller = new AbortController()
+  const fetch = vi.fn().mockResolvedValueOnce(response(null, 401)).mockImplementationOnce((_url, options) =>
+    new Promise((_resolve, reject) => {
+      const abort = () => reject(new DOMException('Cancelled', 'AbortError'))
+      if (options.signal.aborted) abort()
+      else options.signal.addEventListener('abort', abort, { once: true })
+    }))
+  vi.stubGlobal('fetch', fetch)
+  const pending = client.fetchAPI('/settings/example', {
+    method: 'POST', body: '{}', signal: controller.signal, timeoutMs: 10,
+  }).catch(error => error)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  if (mode === 'deadline') await vi.advanceTimersByTimeAsync(10)
+  else controller.abort()
+  const error = await pending
+  if (mode === 'deadline') expect(error.message).toMatch(/超时|timed out/)
+  else expect(error.name).toBe('AbortError')
+  expect(fetch.mock.calls[1][1].signal.aborted).toBe(true)
+  expect(session.getAuthStatus()).toBe(oidcStatus)
+  expect(location.href).toBe('')
+  expect(fetch).toHaveBeenCalledTimes(2)
+  expect(vi.getTimerCount()).toBe(0)
 })
