@@ -25,7 +25,6 @@ import {
 } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { useTranslation } from 'react-i18next'
-import { Onboarding } from '@panwatch/biz-ui/components/onboarding'
 import DiscoveryPanel from '@/components/DiscoveryPanel'
 import Sparkline from '@/components/Sparkline'
 import BenchChart from '@/components/BenchChart'
@@ -392,7 +391,6 @@ export default function DashboardPage() {
 
   return (
     <div className="page-container pb-10">
-      <Onboarding />
       {valuationIncomplete && (
         <p role="status" className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
           {dashboardT('stocksPage.messages.valuationIncomplete')}

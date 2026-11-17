@@ -38,32 +38,38 @@ def sessions(monkeypatch):
     engine.dispose()
 
 
-def run_intraday(monkeypatch, market, *, success=True, bypass=False, symbol="T"):
-    from src.modules.automation.tradingagents import operations
+# The mandatory graph replaces NotifyThrottle with transactional ResearchOutbox.
+# Keep the former listing/restart/failure guarantees against that real boundary.
+from test_investment_research_integration import host, configure, collected, make_context
+from src.modules.research.orchestration.models import ResearchOutbox
+from sqlalchemy.orm import Session
 
-    quote = StockData(symbol=symbol, name=f"{market} listing", market=MarketCode(market),
-        current_price=20, change_pct=4, change_amount=1, volume=100, turnover=2000,
-        open_price=19, high_price=21, low_price=19, prev_close=19)
+
+def run_intraday(monkeypatch, market, *, success=True, bypass=False, symbol="T", trace=None):
+    import uuid
+    from test_investment_research_integration import scripts
+    from src.modules.research.orchestration import service
+    monkeypatch.setattr(service, "ResearchModelGateway", lambda client: scripts.DirectionalModel())
     agent = intraday_monitor.IntradayMonitorAgent(event_only=False, bypass_throttle=bypass)
-    # Keep real analyze(), should_notify(), throttle queries and run_single().
-    monkeypatch.setattr(agent, "collect", AsyncMock(return_value={"stock_data": quote}))
-    for function in ("save_suggestion", "save_agent_context_run", "save_agent_prediction_outcome"):
-        monkeypatch.setattr(intraday_monitor, function, lambda **kwargs: None)
-    monkeypatch.setattr(operations, "try_auto_trigger", lambda *args, **kwargs: None)
-    notifier = SimpleNamespace(notify_with_result=AsyncMock(return_value={"success": success}))
-    context = AgentContext(ai_client=SimpleNamespace(chat=AsyncMock(return_value='{"action":"buy","should_alert":true,"reason":"fixture"}')),
-        notifier=notifier, config=SimpleNamespace(watchlist=[SimpleNamespace(symbol=symbol, market=MarketCode(market))]))
-    return asyncio.run(agent.run_single(context, symbol)), notifier
+    monkeypatch.setattr(agent, "collect", collected)
+    context = make_context(trace=trace or str(uuid.uuid4()), keys=((MarketCode(market), symbol),))
+    context.suppress_notify = False
+    context.notifier.notify_with_result.return_value = {"success": success}
+    result = asyncio.run(agent.run_single(context, symbol))
+    assert context.watchlist[0].symbol == symbol  # canonicalization must be private
+    return result, context.notifier
 
 
-def test_intraday_notifications_are_scoped_across_exchanges_and_restart(sessions, monkeypatch):
+def test_intraday_notifications_are_scoped_across_exchanges_and_restart(host, monkeypatch):
+    engine, _ = host
+    configure(engine, "intraday_monitor")
     for market in ("US", "TSX", "TSXV"):
         result, notifier = run_intraday(monkeypatch, market)
-        assert result.raw_data["notified"] is True, f"{market}:T incorrectly throttled by another listing"
-        assert result.raw_data["stock"]["market"] == market
+        assert result.raw_data["notified"] is True
+        assert result.raw_data["scope"] == [f"{market}:T"]
         assert notifier.notify_with_result.await_count == 1
-    with sessions() as db:
-        assert {r.stock_symbol for r in db.query(NotifyThrottle)} == {"US:T", "TSX:T", "TSXV:T"}
+    with Session(engine) as db:
+        assert db.query(ResearchOutbox).filter_by(status="sent").count() == 3
     for market in ("US", "TSX", "TSXV"):
         result, notifier = run_intraday(monkeypatch, market)
         assert result.raw_data["notified"] is False
@@ -71,44 +77,46 @@ def test_intraday_notifications_are_scoped_across_exchanges_and_restart(sessions
 
 
 @pytest.mark.parametrize("alias,canonical,market", [("REI.UN", "REI-UN", "TSX"), ("ENB.PR.V", "ENB-PV", "TSX"), ("RCK.V", "RCK", "TSXV")])
-def test_throttle_normalizes_listing_aliases(sessions, alias, canonical, market):
-    agent = intraday_monitor.IntradayMonitorAgent()
-    assert agent._check_throttle(alias, market)
-    agent._update_throttle(alias, market)
-    assert not agent._check_throttle(canonical, market)
-    with sessions() as db:
-        assert db.query(NotifyThrottle).one().stock_symbol == f"{market}:{canonical}"
+def test_throttle_normalizes_listing_aliases(host, monkeypatch, alias, canonical, market):
+    engine, _ = host
+    configure(engine, "intraday_monitor")
+    first, _ = run_intraday(monkeypatch, market, symbol=alias)
+    second, notifier = run_intraday(monkeypatch, market, symbol=canonical)
+    assert first.raw_data["notified"] is True
+    assert first.raw_data["scope"] == second.raw_data["scope"] == [f"{market}:{canonical}"]
+    assert second.raw_data["notified"] is False
+    notifier.notify_with_result.assert_not_awaited()
 
 
-def test_legacy_ambiguous_throttle_is_preserved_but_not_assigned_to_a_listing(sessions, monkeypatch):
-    with sessions() as db:
+def test_legacy_ambiguous_throttle_is_preserved_but_not_assigned_to_a_listing(host, monkeypatch):
+    engine, _ = host
+    configure(engine, "intraday_monitor")
+    with Session(engine) as db, db.begin():
         db.add(NotifyThrottle(agent_name="intraday_monitor", stock_symbol="T", last_notify_at=datetime.now(UTC), notify_count=7))
-        db.commit()
     for market in ("US", "TSX"):
         result, _ = run_intraday(monkeypatch, market)
         assert result.raw_data["notified"] is True
-    with sessions() as db:
-        legacy = db.query(NotifyThrottle).filter_by(stock_symbol="T").one()
-        assert legacy.notify_count == 7
-        assert db.query(NotifyThrottle).count() == 3
+    with Session(engine) as db:
+        assert db.query(NotifyThrottle).one().notify_count == 7
+        assert db.query(ResearchOutbox).filter_by(status="sent").count() == 2
 
 
-def test_throttle_failures_bypass_and_expiry_do_not_poison_state(sessions, monkeypatch):
+def test_throttle_unknown_ack_bypass_and_expiry_do_not_duplicate_delivery(host, monkeypatch):
+    engine, _ = host
+    configure(engine, "intraday_monitor")
     result, _ = run_intraday(monkeypatch, "TSX", success=False)
     assert result.raw_data["notified"] is False
-    with sessions() as db:
-        assert db.query(NotifyThrottle).count() == 0
+    # An unknown acknowledgement must NOT be retried automatically.
+    result, notifier = run_intraday(monkeypatch, "TSX")
+    assert result.raw_data["notified"] is False
+    notifier.notify_with_result.assert_not_awaited()
     result, _ = run_intraday(monkeypatch, "TSX", bypass=True)
     assert result.raw_data["notified"] is True
-    with sessions() as db:
-        assert db.query(NotifyThrottle).count() == 0
-        db.add(NotifyThrottle(agent_name="intraday_monitor", stock_symbol="TSX:T", last_notify_at=datetime.now(UTC)-timedelta(days=1), notify_count=9))
-        db.commit()
+    with Session(engine) as db, db.begin():
+        for row in db.query(ResearchOutbox):
+            row.updated_at = datetime.now(UTC) - timedelta(days=1)
     result, _ = run_intraday(monkeypatch, "TSX")
     assert result.raw_data["notified"] is True
-    with sessions() as db:
-        row = db.query(NotifyThrottle).one()
-        assert row.stock_symbol == "TSX:T" and row.notify_count == 1
 
 
 @pytest.mark.parametrize("alias,market,canonical", [
@@ -361,3 +369,28 @@ def test_signalpack_marks_canadian_news_unavailable_for_cn_only_sources(news_bou
     assert packs["T"].news.items == []
     assert "news" in packs["T"].missing
     assert packs["T"].sources["news"] == "unavailable"
+
+
+def test_graph_canonicalizes_duplicate_aliases_without_merging_exchanges(host, monkeypatch):
+    engine, _ = host
+    configure(engine, "intraday_monitor")
+    agent = intraday_monitor.IntradayMonitorAgent()
+    monkeypatch.setattr(agent, "collect", collected)
+    context = make_context(keys=((MarketCode.TSX, "RY.TO"), (MarketCode.TSX, "RY"), (MarketCode.US, "RY")))
+    original = [(s.market, s.symbol) for s in context.watchlist]
+    result = asyncio.run(agent.run(context))
+    assert result.raw_data["scope"] == ["TSX:RY", "US:RY"]
+    assert [(s.market, s.symbol) for s in context.watchlist] == original
+
+
+def test_graph_rejects_conflicting_exchange_alias_before_persistence(host, monkeypatch):
+    engine, _ = host
+    configure(engine, "intraday_monitor")
+    agent = intraday_monitor.IntradayMonitorAgent()
+    monkeypatch.setattr(agent, "collect", AsyncMock(side_effect=AssertionError("must not collect")))
+    context = make_context(keys=((MarketCode.TSX, "RCK.V"),))
+    with pytest.raises(ValueError):
+        asyncio.run(agent.run(context))
+    agent.collect.assert_not_awaited()
+    with Session(engine) as db:
+        assert db.query(ResearchOutbox).count() == 0

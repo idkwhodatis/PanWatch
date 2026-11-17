@@ -80,6 +80,9 @@ def test_execution_links_to_exact_saved_report_across_midnight(
         def _get_provider_kwargs(self):
             return {}
 
+        def run_settings(self):
+            return {}
+
         def propagate(self, ticker, trade_date, portfolio=None):
             graph_calls.append((ticker, trade_date))
             # A long graph run crosses Toronto midnight in both DST regimes.
@@ -88,7 +91,6 @@ def test_execution_links_to_exact_saved_report_across_midnight(
 
     monkeypatch.setattr(trading_graph, "TradingAgentsGraph", FixtureGraph)
     monkeypatch.setattr(agent_module, "apply_compat_patches", lambda: None)
-    monkeypatch.setattr(agent_module, "inject_api_key_env", lambda *a: None)
     monkeypatch.setattr(agent_module, "patch_route_to_vendor", nullcontext)
     monkeypatch.setattr(agent_module, "panwatch_data_context", lambda *a, **k: nullcontext())
     monkeypatch.setattr(agent_module, "build_stock_metadata_context", lambda **k: "")
@@ -106,7 +108,7 @@ def test_execution_links_to_exact_saved_report_across_midnight(
                             asset_type="etf" if security_type == "ETF" else "stock")
     context = SimpleNamespace(
         _force_refresh=True, _trace_id="report-link-fixture", report_language="en-US",
-        model_label="fixture", ai_client=SimpleNamespace(), portfolio=None,
+        model_label="fixture", ai_client=SimpleNamespace(api_key="fixture-not-a-real-key"), portfolio=None,
     )
 
     # Decoy rows make a wrong ticker or next-day link return the wrong report,

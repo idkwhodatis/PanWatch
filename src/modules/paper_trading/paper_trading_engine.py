@@ -100,6 +100,7 @@ def _utc_now() -> datetime:
 
 
 SELL_BLOCK_MESSAGES = {
+    "paper_trading_market_unsupported": "该市场不支持模拟盘成交",
     "paper_trading_t1_locked": "A 股实行 T+1：当日买入的持仓须到下一交易日才能卖出",
     "paper_trading_open_time_missing": "持仓买入时间缺失，无法确认可卖数量",
 }
@@ -111,6 +112,8 @@ def sell_block_reason(pos: PaperTradingPosition, *, now: datetime | None = None)
     SQLite stores naive UTC timestamps. T+1 uses the Shanghai purchase date,
     not elapsed 24-hour periods. The existing calendar guards enforce sessions.
     """
+    if pos.stock_market not in ALL_MARKETS:
+        return "paper_trading_market_unsupported"
     if pos.stock_market != "CN":
         return None
     if pos.opened_at is None:
@@ -311,6 +314,9 @@ class PaperTradingEngine:
         """
         grouped: dict[MarketCode, list[str]] = {}
         for symbol, market in symbols_markets:
+            # Research support does not authorize simulated fills or FX pooling.
+            if market not in ALL_MARKETS:
+                continue
             mc = _to_market(market)
             grouped.setdefault(mc, []).append(symbol)
 

@@ -58,3 +58,64 @@ def test_preferred_ambiguity_and_unsupported_notation_fail_closed(raw, market):
 
 def test_preferred_series_a_provider_notation():
     assert Symbol.parse('ENB.PR.A', 'TSX').to_yfinance() == 'ENB-PA.TO'
+
+
+@pytest.mark.parametrize('offset', [301, 3600, 86400])
+def test_future_provider_timestamp_is_rejected_before_quotes_and_bars(monkeypatch, offset):
+    now = datetime(2026, 11, 17, 6, 0, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    monkeypatch.setattr(canada, 'datetime', Clock)
+    payload = chart()
+    payload['chart']['result'][0]['meta']['regularMarketTime'] = now.timestamp() + offset
+    monkeypatch.setattr(canada, 'market_get', lambda *args, **kwargs: payload)
+    symbol = Symbol.parse('ZSP', 'TSX')
+    assert canada.CanadaQuoteVendor().fetch([symbol], {}) == []
+    with pytest.raises(canada.VendorError, match='future'):
+        canada.CanadaKlineVendor().fetch([symbol], {})
+
+
+def test_provider_clock_skew_tolerance_does_not_relabel_delayed_quotes(monkeypatch):
+    payload = chart()
+    payload['chart']['result'][0]['meta']['regularMarketTime'] = datetime.now(timezone.utc).timestamp() + 60
+    monkeypatch.setattr(canada, 'market_get', lambda *args, **kwargs: payload)
+    result = canada.CanadaQuoteVendor().fetch([Symbol.parse('ZSP', 'TSX')], {})
+    assert len(result) == 1 and result[0].delayed is True
+
+
+@pytest.mark.parametrize('previous', [0, -1, -1e308])
+@pytest.mark.parametrize('from_series', [False, True])
+def test_nonpositive_previous_close_is_unavailable(monkeypatch, previous, from_series):
+    payload = chart()
+    row = payload['chart']['result'][0]
+    row['meta']['previousClose'] = previous
+    if from_series:
+        row['indicators']['quote'][0]['close'][0] = previous
+    else:
+        row['timestamp'] = []
+    monkeypatch.setattr(canada, 'market_get', lambda *args, **kwargs: payload)
+    result = canada.CanadaQuoteVendor().fetch([Symbol.parse('ZSP', 'TSX')], {})[0]
+    assert result.current_price == 23
+    assert result.prev_close is None
+    assert result.change_amount is None and result.change_pct is None
+
+
+@pytest.mark.parametrize('from_series', [False, True])
+def test_derived_change_overflow_is_unavailable(monkeypatch, from_series):
+    payload = chart()
+    row = payload['chart']['result'][0]
+    row['meta'].update(regularMarketPrice=1e308, previousClose=1e-308)
+    if from_series:
+        row['indicators']['quote'][0]['close'][0] = 1e-308
+    else:
+        row['timestamp'] = []
+    monkeypatch.setattr(canada, 'market_get', lambda *args, **kwargs: payload)
+    result = canada.CanadaQuoteVendor().fetch([Symbol.parse('ZSP', 'TSX')], {})[0]
+    assert result.current_price == 1e308 and result.prev_close == 1e-308
+    assert result.change_amount == 1e308 and result.change_pct is None
+
+
+def test_unrepresentable_integer_is_not_a_number():
+    assert canada._number(10 ** 1000) is None

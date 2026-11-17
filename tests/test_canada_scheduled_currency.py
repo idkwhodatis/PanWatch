@@ -1,4 +1,4 @@
-"""Actual ContextBuilder -> scheduled prompt currency boundaries.
+"""Actual ContextBuilder -> mandatory ResearchInput currency boundaries.
 
 Only unrelated source/history I/O and HTTP reference FX transport are controlled.
 No live model or notification delivery is represented by these regressions.
@@ -20,6 +20,19 @@ from src.platform.marketdata import reference_fx
 from src.modules.research.signals.signal_pack import SignalPack
 from src.platform.marketdata.models import MarketCode, StockData
 from src.platform.runtime.config import AppConfig, Settings, StockConfig
+
+
+def prepared_graph(monkeypatch, agent_cls, context, data):
+    from src.modules.research.orchestration import evidence
+    async def no_prior(*args):
+        return None
+    async def collect(scoped):
+        return data
+    monkeypatch.setattr(evidence, 'prior_plan', no_prior)
+    agent = agent_cls()
+    monkeypatch.setattr(agent, 'collect', collect)
+    prepared, details, _ = asyncio.run(evidence.prepare(agent, context, 'canada-currency-test'))
+    return prepared, details
 
 
 @pytest.fixture
@@ -85,28 +98,30 @@ def test_verified_fx_is_applied_before_cost_ratios(research, market, currency, r
 
 @pytest.mark.parametrize('agent', [DailyReportAgent, PremarketOutlookAgent, IntradayMonitorAgent])
 @pytest.mark.parametrize('currency', ['CAD', 'USD'])
-def test_all_scheduled_prompts_preserve_currency_and_quote_provenance(research, agent, currency):
+def test_all_scheduled_graph_inputs_preserve_currency_and_quote_provenance(research, agent, currency, monkeypatch):
     context, constraints, data = research.build(currency=currency)
-    text = agent().build_prompt(data, context)[1]
-    assert f'报价币种 {currency}' in text
-    assert 'TSX:T' in text
-    assert 'yahoo_canada' in text
-    assert '2026-10-09T19:30:00+00:00' in text
-    assert '供应商延迟 是' in text
-    assert '不能视为当前实时行情' in text
-    assert 'CNY' in text
-    assert '50.0%' not in text
-    if agent is IntradayMonitorAgent:
-        assert f'持仓市值：2000.00 {currency}' in text
-        assert '持仓市值：2000 元' not in text
-        assert '成交量：100 股' in text
-    if agent is DailyReportAgent:
-        assert '总持仓成本2000元' not in text
-        assert f'{currency}/CNY' in text
+    prepared, details = prepared_graph(monkeypatch, agent, context, data)
+    technical = next(e for e in details if e.stock_key == 'TSX:T' and e.domain == 'technical')
+    quote = technical.content['quote']
+    assert quote['currency'] == currency
+    assert quote['source'] == 'yahoo_canada'
+    assert quote['source_timestamp'] == '2026-10-09T19:30:00+00:00'
+    assert quote['delayed'] is True
+    validity = technical.content['analysis_context']['quote_validation']
+    assert validity['execution_price_verified'] is False
+    assert validity['usage'] == 'reference_only'
+    security = next(s for s in prepared.securities if s.key == 'TSX:T')
+    assert security.quote_expires_at < prepared.as_of
+    valuation = prepared.portfolio['reference_valuation']
+    assert valuation['positions']['TSX:T']['currency'] == currency
+    assert valuation['positions']['TSX:T']['native_cost'] == 1000
+    assert valuation['buying_power_verified'] is False
+    assert 'unverified' in prepared.portfolio['validation_scope']
+    assert valuation['fx'][currency]['source_date']
 
 
 @pytest.mark.parametrize('agent', [DailyReportAgent, PremarketOutlookAgent, IntradayMonitorAgent])
-def test_missing_fx_stays_unavailable_in_constraints_and_prompts(research, agent):
+def test_missing_fx_stays_unavailable_in_constraints_and_graph(research, agent, monkeypatch):
     research.rates['CAD'] = None
     context, constraints, data = research.build()
     assert constraints['valuation_incomplete']
@@ -114,26 +129,32 @@ def test_missing_fx_stays_unavailable_in_constraints_and_prompts(research, agent
     assert constraints['single_position_ratio'] is None
     assert constraints['risk_budget_hint'] == 'unavailable'
     assert constraints['position']['total_cost_cny'] is None
-    text = agent().build_prompt(data, context)[1]
-    assert '仓位占比 不可用' in text
-    assert '仓位占比 0.0%' not in text
-    assert 'CAD' in text and 'CNY' in text
+    prepared, _ = prepared_graph(monkeypatch, agent, context, data)
+    valuation = prepared.portfolio['reference_valuation']
+    assert valuation['total_cost_cny'] is None
+    assert valuation['valuation_incomplete'] is True
+    assert valuation['positions']['TSX:T']['native_cost'] == 1000
+    assert valuation['positions']['TSX:T']['currency'] == 'CAD'
+    assert valuation['buying_power_verified'] is False
 
 
 @pytest.mark.parametrize('currency,quote_present', [(None, True), ('EUR', True), (None, False)])
-def test_unknown_canadian_currency_does_not_default_to_cad(research, currency, quote_present):
+def test_unknown_canadian_currency_does_not_default_to_cad(research, currency, quote_present, monkeypatch):
     context, constraints, data = research.build(currency=currency, quote_present=quote_present)
     assert constraints['position']['currency'] is None
     assert constraints['valuation_incomplete']
     assert constraints['single_position_ratio'] is None
     assert research.calls == []
-    text = DailyReportAgent().build_prompt(data, context)[1]
-    assert '报价币种 未知' in text
-    assert '总持仓成本 不可用' in text
+    prepared, details = prepared_graph(monkeypatch, DailyReportAgent, context, data)
+    valuation = prepared.portfolio['reference_valuation']
+    assert valuation['positions']['TSX:T']['currency'] is None
+    assert valuation['total_cost_cny'] is None
+    quote = next(e for e in details if e.stock_key == 'TSX:T' and e.domain == 'technical').content
+    assert quote['analysis_context']['quote_validation']['currency'] is None
     if not quote_present:
-        assert '浮盈不可用' in text
-        canadian_section = text.split('### TELUS', 1)[1].split('### Other', 1)[0]
-        assert '浮盈-100.0%' not in canadian_section
+        security = next(s for s in prepared.securities if s.key == 'TSX:T')
+        assert security.price is None
+        assert security.quote_expires_at is None
 
 
 def test_namesake_us_and_canadian_positions_use_separate_currency_costs(research):
@@ -180,3 +201,46 @@ def test_repeated_canadian_lots_fetch_fx_once_and_preserve_fractions(research):
     assert result['positions']['TSX:T']['native_cost'] == 18.5
     assert result['total_cost_cny'] == 92.5
     assert research.calls == ['CAD']
+
+
+@pytest.mark.parametrize('agent_cls', [DailyReportAgent, PremarketOutlookAgent, IntradayMonitorAgent])
+def test_graph_keeps_namesake_markets_and_reference_cash_single_counted(research, agent_cls, monkeypatch):
+    from src.modules.research.orchestration import evidence
+    context, _, data = research.build(add_other_market='US')
+    original = list(context.watchlist)
+    async def no_prior(*args):
+        return None
+    monkeypatch.setattr(evidence, 'prior_plan', no_prior)
+    markets = []
+    async def collect(scoped):
+        market = scoped.watchlist[0].market
+        markets.append(market)
+        quote = StockData('T', 'Namesake', market, 20 if market == MarketCode.TSX else 50,
+                          0, 0, 100, 0, 19, 20, 19, 19.8, currency='CAD' if market == MarketCode.TSX else 'USD',
+                          source_timestamp=datetime.now(timezone.utc), source=market.value, delayed=True)
+        return {'signal_packs': {f'{market.value}:T': SignalPack('T', 'Namesake', market, '', quote=quote, technical={})}}
+    agent = agent_cls()
+    monkeypatch.setattr(agent, 'collect', collect)
+    prepared, details, _ = asyncio.run(evidence.prepare(agent, context, 'namesake'))
+    assert markets == [MarketCode.TSX, MarketCode.US]
+    assert context.watchlist == original
+    assert {s.key: s.price for s in prepared.securities} == {'TSX:T': 20, 'US:T': 50}
+    assert {e.stock_key: e.content['quote']['source'] for e in details if e.domain == 'technical'} == {'TSX:T': 'TSX', 'US:T': 'US'}
+    valuation = prepared.portfolio['reference_valuation']
+    assert len(valuation['accounts']) == 1
+    assert valuation['accounts'][0]['available_funds'] == 1000
+    assert valuation['total_cost_cny'] == 12000
+    assert valuation['positions']['TSX:T']['currency'] == 'CAD'
+    assert valuation['positions']['US:T']['currency'] == 'USD'
+    assert valuation['buying_power_verified'] is False
+    assert 'buying_power_verified' not in prepared.portfolio
+    canadian = next(s for s in prepared.securities if s.key == 'TSX:T')
+    assert canadian.quote_expires_at <= prepared.as_of
+
+
+@pytest.mark.parametrize('source_time', [None, datetime(2999, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 1)])
+def test_unknown_or_future_canadian_quote_clock_cannot_get_fresh_expiry(research, monkeypatch, source_time):
+    context, _, data = research.build()
+    data['signal_packs']['TSX:T'].quote.source_timestamp = source_time
+    prepared, _ = prepared_graph(monkeypatch, DailyReportAgent, context, data)
+    assert next(s for s in prepared.securities if s.key == 'TSX:T').quote_expires_at is None

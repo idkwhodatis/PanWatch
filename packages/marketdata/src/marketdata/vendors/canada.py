@@ -3,7 +3,7 @@
 Quotes are delayed/best-effort. Exact identity, type, currency and provider time
 are required; unavailable data never falls through to a US namesake.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -24,7 +24,7 @@ def _number(value):
     try:
         number = float(value)
         return number if math.isfinite(number) else None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -47,6 +47,12 @@ def _chart(symbol, days=30):
     stamp = _number(meta.get("regularMarketTime"))
     if stamp is None or stamp <= 0:
         raise VendorError("Canadian provider timestamp unavailable")
+    try:
+        source_time = datetime.fromtimestamp(stamp, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise VendorError("Canadian provider timestamp unavailable") from None
+    if source_time > datetime.now(timezone.utc) + timedelta(minutes=5):
+        raise VendorError("Canadian provider timestamp is in the future")
     return result
 
 
@@ -79,14 +85,16 @@ class CanadaQuoteVendor(QuoteVendor):
         prior = [(_number(c), t) for t, c in zip(result.get("timestamp") or [], series.get("close") or [])
                  if datetime.fromtimestamp(t, timezone.utc).astimezone(TORONTO).date() < source_day and _number(c) is not None]
         previous = prior[-1][0] if prior else _number(meta.get("previousClose"))
+        if previous is not None and previous <= 0:
+            previous = None
         return Quote(symbol=symbol.code, market=symbol.market.value,
             name=meta.get("longName") or meta.get("shortName") or symbol.code,
             current_price=price, prev_close=previous,
             open_price=_number(meta.get("regularMarketOpen")),
             high_price=_number(meta.get("regularMarketDayHigh")), low_price=_number(meta.get("regularMarketDayLow")),
             volume=_number(meta.get("regularMarketVolume")),
-            change_amount=price-previous if previous else None,
-            change_pct=(price/previous-1)*100 if previous else None,
+            change_amount=_number(price-previous) if previous is not None else None,
+            change_pct=_number((price/previous-1)*100) if previous is not None else None,
             timestamp=datetime.now(timezone.utc), source_timestamp=stamp, quote_date=source_day,
             source=self.name, currency=meta["currency"], security_type=meta["instrumentType"], delayed=True)
 

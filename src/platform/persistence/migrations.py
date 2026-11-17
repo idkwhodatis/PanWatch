@@ -2180,6 +2180,64 @@ def _m137_stock_asset_type(conn: Connection) -> None:
         conn.execute(text("UPDATE stocks SET asset_type = 'etf' WHERE UPPER(name) LIKE '%ETF%'"))
 
 
+def _m138_investment_research(conn: Connection) -> None:
+    # Freeze this migration's schema without importing mutable business models.
+    statements = (
+        """CREATE TABLE IF NOT EXISTS research_runs (
+            id VARCHAR NOT NULL PRIMARY KEY,
+            trace_id VARCHAR NOT NULL,
+            agent_name VARCHAR NOT NULL,
+            scope_hash VARCHAR NOT NULL,
+            engine VARCHAR NOT NULL,
+            as_of VARCHAR NOT NULL,
+            status VARCHAR NOT NULL,
+            payload JSON,
+            progress JSON,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_research_runs_trace_id ON research_runs (trace_id)",
+        """CREATE TABLE IF NOT EXISTS research_artifacts (
+            run_id VARCHAR NOT NULL,
+            artifact_id VARCHAR NOT NULL,
+            payload JSON NOT NULL,
+            PRIMARY KEY (run_id, artifact_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS research_deliveries (
+            run_id VARCHAR NOT NULL PRIMARY KEY,
+            payload_hash VARCHAR NOT NULL,
+            payload JSON NOT NULL,
+            status VARCHAR NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS research_notification_outbox (
+            run_id VARCHAR NOT NULL,
+            channel_key VARCHAR NOT NULL,
+            status VARCHAR NOT NULL,
+            policy_scope VARCHAR NOT NULL,
+            ttl_minutes INTEGER NOT NULL,
+            error VARCHAR,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (run_id, channel_key)
+        )""",
+    )
+    for statement in statements:
+        conn.execute(text(statement))
+
+
+def _m139_retire_session_legacy(conn: Connection) -> None:
+    """Preserve settings/data while promoting all three session agents to graph execution."""
+    if not _has_table(conn, "agent_configs"):
+        return
+    rows = conn.execute(text("SELECT id, name, config FROM agent_configs WHERE name IN ('daily_report', 'premarket_outlook', 'intraday_monitor')")).fetchall()
+    for identity, name, value in rows:
+        config = json.loads(value) if isinstance(value, str) else dict(value or {})
+        graph = dict(config.get("research_graph") or {})
+        graph["engine"] = "langgraph"
+        config["research_graph"] = graph
+        conn.execute(text("UPDATE agent_configs SET config=:config WHERE id=:id"),
+                     {"id": identity, "config": json.dumps(config, ensure_ascii=False)})
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -2218,6 +2276,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(135, "retire_unused_agents", _m135_retire_unused_agents),
     Migration(136, "paper_trading_settlement", _m136_paper_trading_settlement),
     Migration(137, "stock_asset_type", _m137_stock_asset_type),
+    Migration(138, "investment_research_delivery", _m138_investment_research),
+    Migration(139, "retire_session_legacy", _m139_retire_session_legacy),
 )
 
 
@@ -2238,9 +2298,38 @@ LIMIT 1
     return int(row[0]), str(row[1]), int(row[2])
 
 
+def validate_migration_lineage(engine: Engine) -> None:
+    """Do not reinterpret the archived native-currency experiment as full Canada.
+
+    Its versions 138/139 mean different things, and retained currency columns
+    alone cannot make its native-only costs safe in the full research runtime.
+    Check before any schema/legacy writes, retaining the ledger for recovery.
+    """
+    with engine.connect() as conn:
+        if not _has_table(conn, "schema_migrations"):
+            return
+        rows = conn.execute(text("SELECT version, name FROM schema_migrations WHERE version IN (138, 139)")).all()
+        staged = {138: "stock_listing_currency", 139: "position_cost_currency"}
+        if any(staged.get(version) == name for version, name in rows):
+            raise RuntimeError(
+                "Database uses staged Canada currency migrations 138/139. "
+                "Keep a database backup and use an explicitly reviewed native-cost currency migration "
+                "before switching to the full Canada research build; no migration ledger was overwritten."
+            )
+        expected = {138: "investment_research_delivery", 139: "retire_session_legacy"}
+        if any(expected.get(version) != name for version, name in rows):
+            raise RuntimeError(
+                "Unrecognized database migration lineage at version 138/139. "
+                "Keep a database backup and review its source migration history before upgrading; "
+                "no migration ledger was overwritten."
+            )
+
+
 def has_pending_migrations(engine: Engine) -> bool:
-    with engine.begin() as conn:
-        _ensure_schema_table(conn)
+    with engine.connect() as conn:
+        # Detection must be read-only so backup precedes all schema writes.
+        if not conn.execute(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'")).first():
+            return True
         for m in MIGRATIONS:
             rec = _get_applied(conn, m.version)
             if not rec or rec[2] != 1 or rec[1] != m.checksum:
@@ -2249,6 +2338,7 @@ def has_pending_migrations(engine: Engine) -> bool:
 
 
 def run_versioned_migrations(engine: Engine) -> None:
+    validate_migration_lineage(engine)
     with engine.begin() as conn:
         _ensure_schema_table(conn)
 
