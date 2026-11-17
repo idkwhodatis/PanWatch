@@ -23,7 +23,7 @@ import uuid
 OWNER = "panwatch-isolated-qa-v1"
 SKILL_PATH = Path(".agents/skills/panwatch-local-delivery")
 EXCLUDED = {".git", ".docs", ".venv", "venv", ".claude", ".cursor", ".gemini", ".codex", ".pytest_cache", ".worktrees", ".superpowers", "__pycache__", "node_modules", "dist", "build", "static", "data", ".vite"}
-LOCAL_MODULES = ("marketdata", "pan_agent", "pan_agent_token_meter", "pan_agent_tool_research")
+LOCAL_MODULES = ("marketdata", "pan_agent", "pan_agent_token_meter", "pan_agent_tool_research", "pan_investment_research")
 
 
 class IsolationError(ValueError):
@@ -111,11 +111,11 @@ def assignment(path: Path, name: str) -> ast.AST:
 
 def check_mapping(source: Path) -> None:
     expressions = (
-        ("src/platform/persistence/database.py", "DB_PATH", "os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'panwatch.db')"),
+        ("src/platform/persistence/database.py", "DB_PATH", "str(get_data_dir() / 'panwatch.db')"),
         ("src/platform/marketdata/stock_list.py", "PROJECT_ROOT", "Path(__file__).resolve().parents[3]"),
-        ("src/platform/marketdata/stock_list.py", "DATA_DIR", "PROJECT_ROOT / 'data'"),
+        ("src/platform/marketdata/stock_list.py", "DATA_DIR", "get_data_dir()"),
         ("server.py", "static_dir", "os.path.join(os.path.dirname(__file__), 'static')"),
-        ("server.py", "bundle_path", "os.path.join(os.path.dirname(__file__), 'data', 'ca-bundle.pem')"),
+        ("server.py", "bundle_path", "str(get_data_dir() / 'ca-bundle.pem')"),
     )
     for file, name, expression in expressions:
         expected = ast.parse(expression, mode="eval").body
@@ -280,7 +280,7 @@ run = pathlib.Path(sys.argv[1]).resolve()
 source = run / "source"
 sys.path[:0] = [str(source)] + [str(p) for p in sorted((source / "packages").glob("*/src"))]
 origins = {}
-for name in ("marketdata", "pan_agent", "pan_agent_token_meter", "pan_agent_tool_research"):
+for name in ("marketdata", "pan_agent", "pan_agent_token_meter", "pan_agent_tool_research", "pan_investment_research"):
     spec = importlib.util.find_spec(name)
     if spec is None or spec.origin is None or not pathlib.Path(spec.origin).resolve().is_relative_to(source):
         raise SystemExit("QA module origin rejected: " + name)
