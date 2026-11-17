@@ -1,7 +1,7 @@
 <h1 align="center">PanWatch — Self-hosted AI stock monitoring</h1>
 
 <p align="center">
-  <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a>
+  <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
@@ -33,6 +33,15 @@
 ![PanWatch TradingAgents deep-analysis demo](docs/screenshots/tradingagents-demo.gif)
 
 > 🧠 **Start from a portfolio holding → let a nine-agent TradingAgents research team analyze it → follow the bull/bear debate and risk review → receive a PM decision memo and the complete reasoning trail in your messaging app within 3–5 minutes.**
+
+<details open>
+<summary>❤️ Sponsors</summary>
+
+| Logo | Introduction |
+| --- | --- |
+| <a href="https://88api.ai/sign-up?aff=W38W"><img src="./docs/sponsors/88api-logo.png" alt="88API" width="120"></a> | [**88API Token Aggregation Platform**](https://88api.ai/sign-up?aff=W38W)<br><br>🧠 Access language and coding models including GPT, Claude, Gemini, Grok, DeepSeek, Kimi, and GLM;<br>🎨 Image models: GPT-Image, Gemini, Grok, and more;<br>🎬 Video models: Seedance, Veo, MiniMax H3, Kling, Grok, and more;<br>🎙️ Speech capabilities: Whisper, TTS, and more. From copywriting and image generation and editing to video generation and voiceovers.<br>🎁 New users receive trial credits upon registration to test model capabilities. Live customer support is available on the site!<br>👉 Operated by a registered Hong Kong company · Stable availability · Fully operational, full-capability service · No reduced model intelligence · Invoices available<br><br>[**Register now →**](https://88api.ai/sign-up?aff=W38W) |
+
+</details>
 
 ## 📸 Feature Overview
 
@@ -218,7 +227,7 @@ Select the brain icon beside a holding to start TradingAgents deep analysis. Fou
 <details>
 <summary>Local development</summary>
 
-**Requirements:** Python 3.10+ / Node.js 24.14.0 / pnpm 9.15.9
+**Requirements:** Python 3.11+ / Node.js 24.14.0 / pnpm 9.15.9
 
 ```bash
 # One-command development setup (recommended)
